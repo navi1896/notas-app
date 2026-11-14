@@ -5,7 +5,7 @@
   "webVersion": "1.8.1",
   "minAndroidVersionCode": 7,
   "releaseDate": "2026-11-14",
-  "notes": "Corrige el error de permisos al crear el negocio y subir productos existentes a la nube (v1.8.1).",,
+  "notes": "Corrige el error de permisos al crear el negocio y subir productos existentes a la nube (v1.8.1).",
   "webBaseUrl": "https://navi1896.github.io/notas-app/",
   "updateUrl": "https://navi1896.github.io/notas-app/version.json",
   "apkUrl": "https://github.com/navi1896/notas-app/releases/latest/download/Notas.apk"
