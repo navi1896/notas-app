@@ -1,11 +1,11 @@
 {
   "appName": "Notas",
-  "versionName": "1.7.3",
+  "versionName": "1.7.4",
   "versionCode": 9,
-  "webVersion": "1.7.3",
+  "webVersion": "1.7.4",
   "minAndroidVersionCode": 7,
   "releaseDate": "2026-11-13",
-  "notes": "Imágenes de productos más grandes en Stock y Catálogo, selector Chica/Mediana/Grande y vista ampliada al tocar cualquier foto (v1.7.3).",
+  "notes": "Proporciones de tarjetas de producto mejoradas en Nueva venta y Stock con foto más grande, etiqueta de stock y selector en cápsula (v1.7.4).",
   "webBaseUrl": "https://navi1896.github.io/notas-app/",
   "updateUrl": "https://navi1896.github.io/notas-app/version.json",
   "apkUrl": "https://github.com/navi1896/notas-app/releases/latest/download/Notas.apk"
