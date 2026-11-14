@@ -32,7 +32,7 @@
       messagingSenderId:'1002701021775',
       measurementId:'G-787ZQ138B2'
     };
-    const APP_LOCAL_VERSION=(()=>{try{const info=window.NotasApp?.getAppVersion?.();if(info)return JSON.parse(info)}catch{}return {versionCode:9,versionName:'1.8.0',webVersion:'1.8.0',platform:'web'}})();
+    const APP_LOCAL_VERSION=(()=>{try{const info=window.NotasApp?.getAppVersion?.();if(info)return JSON.parse(info)}catch{}return {versionCode:9,versionName:'1.8.1',webVersion:'1.8.1',platform:'web'}})();
     const initialCatalogParam=(()=>{try{const u=new URL(location.href);const q=u.searchParams.get('catalogo')||u.searchParams.get('catalog')||'';if(q)return q.trim();const h=location.hash||'';const m=h.match(/catalogo=([a-zA-Z0-9_-]+)/);return m?m[1]:''}catch{return ''}})();
     let cloud={
       sdkLoaded:false,sdkError:'',app:null,auth:null,db:null,fb:null,
@@ -90,6 +90,8 @@
       if(code==='auth/invalid-email')return 'Escribe un correo electrónico válido.';
       if(code==='auth/network-request-failed')return 'Sin conexión a internet. Revisa tu red e intenta de nuevo.';
       if(code==='auth/too-many-requests')return 'Demasiados intentos seguidos. Espera un momento.';
+      if(code==='permission-denied')return 'No tienes permisos para completar esta acción en la nube.';
+      if(code==='unavailable')return 'Sin conexión con el servidor. Intenta de nuevo.';
       return err?.message||'No se pudo completar la operación.';
     }
     async function ensureFirebase(){
@@ -124,13 +126,17 @@
       }
     }
     function buildProductDoc(record){
-      return {id:String(record.id),name:String(record.name||'Producto').slice(0,160),category:String(record.category||'Productos').slice(0,80),price:Math.max(0,Number(record.price)||0),stock:Math.max(0,Number(record.stock)||0),min:Math.max(0,Number(record.min)||0),emoji:String(record.emoji||'📦').slice(0,16),photo:resolvePortablePhoto(record),updatedAt:Date.now()};
+      const pid=String(record.id||uid()).trim().slice(0,128)||uid();
+      const name=String(record.name||'').trim().slice(0,160)||'Producto';
+      return {id:pid,name,category:String(record.category||'Productos').trim().slice(0,80),price:Math.max(0,Number(record.price)||0),stock:Math.max(0,Number(record.stock)||0),min:Math.max(0,Number(record.min)||0),emoji:String(record.emoji||'📦').slice(0,16)||'📦',photo:resolvePortablePhoto({...record,id:pid}),updatedAt:Date.now()};
     }
     function buildCatalogItemDoc(record){
-      return {id:String(record.id),name:String(record.name||'Producto').slice(0,160),category:String(record.category||'Productos').slice(0,80),price:Math.max(0,Number(record.price)||0),available:(Number(record.stock)||0)>0,emoji:String(record.emoji||'📦').slice(0,16),photo:resolvePortablePhoto(record),updatedAt:Date.now()};
+      const pid=String(record.id||uid()).trim().slice(0,128)||uid();
+      const name=String(record.name||'').trim().slice(0,160)||'Producto';
+      return {id:pid,name,category:String(record.category||'Productos').trim().slice(0,80),price:Math.max(0,Number(record.price)||0),available:(Number(record.stock)||0)>0,emoji:String(record.emoji||'📦').slice(0,16)||'📦',photo:resolvePortablePhoto({...record,id:pid}),updatedAt:Date.now()};
     }
     function buildCatalogStoreDoc(storeId,settings){
-      return {storeId:String(storeId),business:String(settings.business||'Mi negocio').slice(0,120),phone:String(settings.phone||'').slice(0,40),currency:String(settings.currency||'MXN').slice(0,10),updatedAt:Date.now()};
+      return {storeId:String(storeId),business:String(settings.business||'').trim().slice(0,120)||'Mi negocio',phone:String(settings.phone||'').slice(0,40),currency:String(settings.currency||'MXN').trim().slice(0,10)||'MXN',updatedAt:Date.now()};
     }
     async function subscribePublicCatalog(storeId){
       clearCloudListeners();
@@ -216,7 +222,7 @@
       },()=>{});
       const uCust=onSnapshot(collection(db,'stores',storeId,'customers'),snap=>{
         state.customers=snap.docs.map(d=>d.data()).sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'es-MX'));
-        cacheCloudRender();scheduleCloudRender();
+        cacheCloudState();scheduleCloudRender();
       },()=>{});
       const uSales=onSnapshot(collection(db,'stores',storeId,'sales'),snap=>{
         state.sales=snap.docs.map(d=>d.data()).sort((a,b)=>String(b.date||'').localeCompare(String(a.date||''))||(Number(b.createdAt)||0)-(Number(a.createdAt)||0));
@@ -282,47 +288,47 @@
       const cleanName=(business||'Mi negocio').trim().slice(0,120)||'Mi negocio';
       const myName=(ownerName||cloud.user.displayName||cloud.user.email||'Dueño').trim().slice(0,120);
       const local=loadState()||state;
-      const seq=migrateLocal?Math.max(1,Number(local.saleSequence)||1,...(local.sales||[]).map(s=>(Number(s.folio)||0)+1)):1;
+      const seq=migrateLocal?Math.max(1,Math.floor(Number(local.saleSequence)||1),...(local.sales||[]).map(s=>Math.floor(Number(s.folio)||0)+1)):1;
       const storeSettings=migrateLocal?{...local.settings,business:cleanName}:{business:cleanName,currency:'MXN',address:'',phone:'',email:'',registration:'',seller:myName};
-      const existingIds=Array.isArray(cloud.profile?.storeIds)?cloud.profile.storeIds.filter(x=>x!==storeId):[];
+      const existingIds=Array.isArray(cloud.profile?.storeIds)?cloud.profile.storeIds.filter(x=>typeof x==='string'&&x&&x!==storeId):[];
       const userDoc={uid,email:cloud.user.email||'',displayName:myName,activeStoreId:storeId,storeIds:[storeId,...existingIds].slice(0,20),updatedAt:now};
-      const storeDoc={id:storeId,business:cleanName,currency:String(storeSettings.currency||'MXN').slice(0,10),address:String(storeSettings.address||'').slice(0,250),phone:String(storeSettings.phone||'').slice(0,40),email:String(storeSettings.email||'').slice(0,254),registration:String(storeSettings.registration||'').slice(0,80),seller:String(storeSettings.seller||myName).slice(0,120),ownerUid:uid,saleSequence:seq,createdAt:now,updatedAt:now};
+      const storeDoc={id:storeId,business:cleanName,currency:String(storeSettings.currency||'MXN').trim().slice(0,10)||'MXN',address:String(storeSettings.address||'').slice(0,250),phone:String(storeSettings.phone||'').slice(0,40),email:String(storeSettings.email||'').slice(0,254),registration:String(storeSettings.registration||'').slice(0,80),seller:String(storeSettings.seller||myName).slice(0,120),ownerUid:uid,saleSequence:seq,createdAt:now,updatedAt:now};
       const memberDoc={uid,email:cloud.user.email||'',name:myName,role:'owner',active:true,joinedAt:now,updatedAt:now};
       const b1=writeBatch(db);
       b1.set(doc(db,'stores',storeId),storeDoc);
       b1.set(doc(db,'stores',storeId,'members',uid),memberDoc);
-      b1.set(doc(db,'users',uid),userDoc);
-      b1.set(doc(db,'catalog',storeId),buildCatalogStoreDoc(storeId,storeDoc));
+      b1.set(doc(db,'users',uid),userDoc,{merge:true});
       await b1.commit();
+      const ops=[[doc(db,'catalog',storeId),buildCatalogStoreDoc(storeId,storeDoc)]];
       if(migrateLocal){
-        const ops=[];
         for(const p of (local.products||[])){
-          const pd={...buildProductDoc(p),createdAt:now};
+          const cleanProd={...p,id:String(p.id||uid()).trim().slice(0,128)||uid()};
+          const pd={...buildProductDoc(cleanProd),createdAt:now};
           ops.push([doc(db,'stores',storeId,'products',pd.id),pd]);
-          ops.push([doc(db,'stores',storeId,'productCosts',pd.id),{id:pd.id,productId:pd.id,cost:Math.max(0,Number(p.cost)||0),createdAt:now,updatedAt:now}]);
-          ops.push([doc(db,'catalog',storeId,'items',pd.id),buildCatalogItemDoc(p)]);
+          ops.push([doc(db,'stores',storeId,'productCosts',pd.id),{id:pd.id,productId:pd.id,cost:Math.max(0,Number(cleanProd.cost)||0),createdAt:now,updatedAt:now}]);
+          ops.push([doc(db,'catalog',storeId,'items',pd.id),buildCatalogItemDoc(cleanProd)]);
         }
         for(const e of (local.expenses||[])){
-          const id=String(e.id||uid());
-          ops.push([doc(db,'stores',storeId,'expenses',id),{id,date:String(e.date||today()),name:String(e.name||'Gasto').slice(0,160),category:String(e.category||'Otros').slice(0,80),amount:Math.max(0,Number(e.amount)||0),payment:String(e.payment||'Efectivo').slice(0,60),notes:String(e.notes||'').slice(0,1000),createdAt:now,updatedAt:now}]);
+          const id=String(e.id||uid()).trim().slice(0,128)||uid();
+          ops.push([doc(db,'stores',storeId,'expenses',id),{id,date:String(e.date||today()).trim().slice(0,32)||today(),name:String(e.name||'').trim().slice(0,160)||'Gasto',category:String(e.category||'Otros').slice(0,80),amount:Math.max(0,Number(e.amount)||0),payment:String(e.payment||'Efectivo').slice(0,60),notes:String(e.notes||'').slice(0,1000),createdAt:now,updatedAt:now}]);
         }
         for(const c of (local.customers||[])){
-          const id=String(c.id||uid());
-          ops.push([doc(db,'stores',storeId,'customers',id),{id,name:String(c.name||'Cliente').slice(0,160),phone:String(c.phone||'').slice(0,40),email:String(c.email||'').slice(0,254),notes:String(c.notes||'').slice(0,1000),createdAt:now,updatedAt:now}]);
+          const id=String(c.id||uid()).trim().slice(0,128)||uid();
+          ops.push([doc(db,'stores',storeId,'customers',id),{id,name:String(c.name||'').trim().slice(0,160)||'Cliente',phone:String(c.phone||'').slice(0,40),email:String(c.email||'').slice(0,254),notes:String(c.notes||'').slice(0,1000),createdAt:now,updatedAt:now}]);
         }
         for(const s of (local.suppliers||[])){
-          const id=String(s.id||uid());
-          ops.push([doc(db,'stores',storeId,'suppliers',id),{id,name:String(s.name||'Proveedor').slice(0,160),phone:String(s.phone||'').slice(0,40),email:String(s.email||'').slice(0,254),notes:String(s.notes||'').slice(0,1000),createdAt:now,updatedAt:now}]);
+          const id=String(s.id||uid()).trim().slice(0,128)||uid();
+          ops.push([doc(db,'stores',storeId,'suppliers',id),{id,name:String(s.name||'').trim().slice(0,160)||'Proveedor',phone:String(s.phone||'').slice(0,40),email:String(s.email||'').slice(0,254),notes:String(s.notes||'').slice(0,1000),createdAt:now,updatedAt:now}]);
         }
         for(const v of (local.sales||[])){
-          const id=String(v.id||uid()),tot=Math.max(0,Number(v.total)||0),pd=Math.min(tot,Math.max(0,Number(v.paid)||0));
-          ops.push([doc(db,'stores',storeId,'sales',id),{id,folio:String(v.folio||'0001').slice(0,32),date:String(v.date||today()),time:String(v.time||'').slice(0,32),seller:String(v.seller||myName).slice(0,120),sellerUid:uid,items:Array.isArray(v.items)?v.items.slice(0,200):[],product:String(v.product||'').slice(0,200),productId:String(v.productId||'').slice(0,128),qty:Math.max(0,Number(v.qty)||0),unitPrice:Math.max(0,Number(v.unitPrice)||0),total:tot,customer:String(v.customer||'').slice(0,160),payment:String(v.payment||'Efectivo').slice(0,60),paid:pd,createdAt:now,updatedAt:now}]);
+          const id=String(v.id||uid()).trim().slice(0,128)||uid(),tot=Math.max(0,Number(v.total)||0),pd=Math.min(tot,Math.max(0,Number(v.paid)||0));
+          ops.push([doc(db,'stores',storeId,'sales',id),{id,folio:String(v.folio||'0001').slice(0,32),date:String(v.date||today()).trim().slice(0,32)||today(),time:String(v.time||'').slice(0,32),seller:String(v.seller||myName).slice(0,120),sellerUid:uid,items:Array.isArray(v.items)?v.items.slice(0,200):[],product:String(v.product||'').slice(0,200),productId:String(v.productId||'').slice(0,128),qty:Math.max(0,Number(v.qty)||0),unitPrice:Math.max(0,Number(v.unitPrice)||0),total:tot,customer:String(v.customer||'').slice(0,160),payment:String(v.payment||'').trim().slice(0,60)||'Efectivo',paid:pd,createdAt:now,updatedAt:now}]);
         }
-        for(let i=0;i<ops.length;i+=400){
-          const bx=writeBatch(db);
-          ops.slice(i,i+400).forEach(([ref,data])=>bx.set(ref,data));
-          await bx.commit();
-        }
+      }
+      for(let i=0;i<ops.length;i+=400){
+        const bx=writeBatch(db);
+        ops.slice(i,i+400).forEach(([ref,data])=>bx.set(ref,data));
+        await bx.commit();
       }
       cloud.profile=userDoc;cloud.onboardingForced=false;
       await attachStoreCloud(storeId,'owner');
