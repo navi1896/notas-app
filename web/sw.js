@@ -1,9 +1,9 @@
-const CACHE = 'notas-shell-v21';
+const CACHE = 'notas-shell-v22';
 const FILES = [
   './',
   './index.html',
-  './styles.css',
-  './app.js',
+  './styles.css?v=1.8.5',
+  './app.js?v=1.8.5',
   './manifest.webmanifest',
   './version.json',
   './icon.svg',
@@ -45,7 +45,7 @@ self.addEventListener('fetch', (event) => {
 
   // Network-first para detectar nuevas versiones automáticamente en PC/PWA y caer a caché offline
   event.respondWith(
-    fetch(event.request)
+    fetch(event.request, { cache: 'no-cache' })
       .then((response) => {
         if (response && response.ok) {
           const copy = response.clone();

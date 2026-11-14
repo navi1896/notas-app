@@ -32,7 +32,7 @@
       messagingSenderId:'1002701021775',
       measurementId:'G-787ZQ138B2'
     };
-    const APP_LOCAL_VERSION=(()=>{try{const info=window.NotasApp?.getAppVersion?.();if(info)return JSON.parse(info)}catch{}return {versionCode:9,versionName:'1.8.2',webVersion:'1.8.2',platform:'web'}})();
+    const APP_LOCAL_VERSION=(()=>{try{const info=window.NotasApp?.getAppVersion?.();if(info)return JSON.parse(info)}catch{}return {versionCode:9,versionName:'1.8.5',webVersion:'1.8.5',platform:'web'}})();
     const initialCatalogParam=(()=>{try{const u=new URL(location.href);const q=u.searchParams.get('catalogo')||u.searchParams.get('catalog')||'';if(q)return q.trim();const h=location.hash||'';const m=h.match(/catalogo=([a-zA-Z0-9_-]+)/);return m?m[1]:''}catch{return ''}})();
     let cloud={
       sdkLoaded:false,sdkError:'',app:null,auth:null,db:null,fb:null,
