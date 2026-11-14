@@ -2,10 +2,10 @@
   "appName": "Notas",
   "versionName": "1.6.0",
   "versionCode": 7,
-  "webVersion": "1.6.2",
+  "webVersion": "1.6.3",
   "minAndroidVersionCode": 7,
   "releaseDate": "2026-11-13",
-  "notes": "Inicio simplificado y más limpio para celular y PC (v1.6.2).",
+  "notes": "Ventas más ágiles: filtros por pago reales, tarjetas compactas en celular, selección de productos en 1 toque y cobro con abono inicial (v1.6.3).",
   "webBaseUrl": "https://navi1896.github.io/notas-app/",
   "updateUrl": "https://navi1896.github.io/notas-app/version.json",
   "apkUrl": "https://github.com/navi1896/notas-app/releases/latest/download/Notas.apk"
