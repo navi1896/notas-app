@@ -1,11 +1,11 @@
 {
   "appName": "Notas",
-  "versionName": "1.8.2",
+  "versionName": "1.8.3",
   "versionCode": 9,
-  "webVersion": "1.8.2",
+  "webVersion": "1.8.3",
   "minAndroidVersionCode": 7,
   "releaseDate": "2026-11-14",
-  "notes": "Cierra el menú móvil al abrir secciones como Catálogo/Equipo y agrega vista previa rápida de Vendedor desde la cuenta de Dueño (v1.8.2).",
+  "notes": "Agrega botón directo de Vista vendedor en la barra superior para PC y móvil (v1.8.3).",
   "webBaseUrl": "https://navi1896.github.io/notas-app/",
   "updateUrl": "https://navi1896.github.io/notas-app/version.json",
   "apkUrl": "https://github.com/navi1896/notas-app/releases/latest/download/Notas.apk"
