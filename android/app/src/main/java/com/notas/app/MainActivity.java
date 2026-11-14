@@ -6,14 +6,18 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Typeface;
+import android.media.ExifInterface;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.print.PrintManager;
+import android.provider.MediaStore;
 import android.util.Base64;
 import android.view.View;
 import android.webkit.JavascriptInterface;
@@ -43,8 +47,9 @@ import java.util.List;
 public class MainActivity extends Activity {
     private static final int CHOOSE_PRODUCT_IMAGE = 1001;
     private static final int CREATE_BACKUP = 1002;
-    private static final int BUNDLED_VERSION_CODE = 7;
-    private static final String BUNDLED_VERSION_NAME = "1.6.0";
+    private static final int TAKE_PRODUCT_IMAGE = 1003;
+    private static final int BUNDLED_VERSION_CODE = 8;
+    private static final String BUNDLED_VERSION_NAME = "1.7.0";
     private static final String PREFS_NAME = "notas_local";
     private static final String KEY_STATE = "state";
     private static final String KEY_OTA_CODE = "ota_version_code";
@@ -52,6 +57,8 @@ public class MainActivity extends Activity {
 
     private WebView webView;
     private ValueCallback<Uri[]> pendingImageChooser;
+    private ValueCallback<Uri[]> pendingCameraChooser;
+    private File pendingCameraFile;
     private String pendingBackup;
 
     @Override
@@ -105,6 +112,14 @@ public class MainActivity extends Activity {
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
+                if (fileChooserParams != null && fileChooserParams.isCaptureEnabled()) {
+                    if (pendingImageChooser != null) {
+                        pendingImageChooser.onReceiveValue(null);
+                        pendingImageChooser = null;
+                    }
+                    launchNativeCamera(filePathCallback);
+                    return true;
+                }
                 if (pendingImageChooser != null) {
                     pendingImageChooser.onReceiveValue(null);
                 }
@@ -187,9 +202,129 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void launchNativeCamera(ValueCallback<Uri[]> chooserCallback) {
+        if (pendingCameraChooser != null) {
+            pendingCameraChooser.onReceiveValue(null);
+            pendingCameraChooser = null;
+        }
+        pendingCameraChooser = chooserCallback;
+        try {
+            File dir = new File(getCacheDir(), "camera");
+            if (!dir.exists()) dir.mkdirs();
+            pendingCameraFile = new File(dir, "capture-" + System.currentTimeMillis() + ".jpg");
+            Uri uri = ShareFileProvider.uriForCamera(this, pendingCameraFile);
+            Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+            intent.putExtra(MediaStore.EXTRA_OUTPUT, uri);
+            intent.setClipData(ClipData.newRawUri("photo", uri));
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            startActivityForResult(intent, TAKE_PRODUCT_IMAGE);
+        } catch (Exception e) {
+            if (pendingCameraFile != null && pendingCameraFile.exists()) {
+                pendingCameraFile.delete();
+            }
+            pendingCameraFile = null;
+            if (pendingCameraChooser != null) {
+                pendingCameraChooser.onReceiveValue(null);
+                pendingCameraChooser = null;
+            } else if (webView != null) {
+                webView.evaluateJavascript("window.notasOnCameraPhoto && window.notasOnCameraPhoto('')", null);
+            }
+            Toast.makeText(this, "No se pudo abrir la cámara", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private String encodeCapturedBitmap(File file) {
+        try {
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
+            int maxDim = Math.max(bounds.outWidth, bounds.outHeight);
+            int sample = 1;
+            while (maxDim / sample > 960) {
+                sample *= 2;
+            }
+            BitmapFactory.Options opts = new BitmapFactory.Options();
+            opts.inSampleSize = sample;
+            Bitmap raw = BitmapFactory.decodeFile(file.getAbsolutePath(), opts);
+            if (raw == null) return "";
+
+            int rotate = 0;
+            try {
+                ExifInterface exif = new ExifInterface(file.getAbsolutePath());
+                int orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
+                if (orientation == ExifInterface.ORIENTATION_ROTATE_90) rotate = 90;
+                else if (orientation == ExifInterface.ORIENTATION_ROTATE_180) rotate = 180;
+                else if (orientation == ExifInterface.ORIENTATION_ROTATE_270) rotate = 270;
+            } catch (Exception ignored) {
+            }
+
+            Bitmap oriented = raw;
+            if (rotate != 0) {
+                Matrix m = new Matrix();
+                m.postRotate(rotate);
+                oriented = Bitmap.createBitmap(raw, 0, 0, raw.getWidth(), raw.getHeight(), m, true);
+                if (oriented != raw) raw.recycle();
+            }
+
+            Bitmap square = Bitmap.createBitmap(320, 320, Bitmap.Config.ARGB_8888);
+            Canvas canvas = new Canvas(square);
+            canvas.drawColor(Color.WHITE);
+            float scale = Math.min(320f / oriented.getWidth(), 320f / oriented.getHeight());
+            float w = Math.max(1f, oriented.getWidth() * scale);
+            float h = Math.max(1f, oriented.getHeight() * scale);
+            float left = (320f - w) / 2f;
+            float top = (320f - h) / 2f;
+            canvas.drawBitmap(oriented, null, new android.graphics.RectF(left, top, left + w, top + h), new Paint(Paint.FILTER_BITMAP_FLAG));
+            oriented.recycle();
+
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            square.compress(Bitmap.CompressFormat.JPEG, 72, baos);
+            square.recycle();
+            return "data:image/jpeg;base64," + Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+
+        if (requestCode == TAKE_PRODUCT_IMAGE) {
+            File photoFile = pendingCameraFile;
+            pendingCameraFile = null;
+            ValueCallback<Uri[]> chooser = pendingCameraChooser;
+            pendingCameraChooser = null;
+
+            if (chooser != null) {
+                if (resultCode == RESULT_OK && photoFile != null && photoFile.exists() && photoFile.length() > 0) {
+                    chooser.onReceiveValue(new Uri[]{Uri.fromFile(photoFile)});
+                } else {
+                    if (photoFile != null && photoFile.exists()) photoFile.delete();
+                    chooser.onReceiveValue(null);
+                }
+                return;
+            }
+
+            if (resultCode != RESULT_OK || photoFile == null || !photoFile.exists() || photoFile.length() == 0) {
+                if (photoFile != null && photoFile.exists()) photoFile.delete();
+                if (webView != null) {
+                    webView.evaluateJavascript("window.notasOnCameraPhoto && window.notasOnCameraPhoto('')", null);
+                }
+                return;
+            }
+
+            new Thread(() -> {
+                String dataUrl = encodeCapturedBitmap(photoFile);
+                photoFile.delete();
+                runOnUiThread(() -> {
+                    if (webView != null) {
+                        webView.evaluateJavascript("window.notasOnCameraPhoto && window.notasOnCameraPhoto(" + JSONObject.quote(dataUrl) + ")", null);
+                    }
+                });
+            }).start();
+            return;
+        }
 
         if (requestCode == CHOOSE_PRODUCT_IMAGE) {
             ValueCallback<Uri[]> callback = pendingImageChooser;
@@ -519,6 +654,11 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 return false;
             }
+        }
+
+        @JavascriptInterface
+        public void takeProductPhoto() {
+            runOnUiThread(() -> launchNativeCamera(null));
         }
 
         @JavascriptInterface

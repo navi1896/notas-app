@@ -43,12 +43,21 @@ public class ShareFileProvider extends ContentProvider {
                 .build();
     }
 
+    public static Uri uriForCamera(Context context, File file) {
+        return new Uri.Builder()
+                .scheme("content")
+                .authority(AUTHORITY)
+                .appendPath("camera")
+                .appendPath(file.getName())
+                .build();
+    }
+
     @Override
     public boolean onCreate() {
         return true;
     }
 
-    private File resolve(Uri uri) throws FileNotFoundException {
+    private File resolve(Uri uri, boolean allowMissing) throws FileNotFoundException {
         Context context = getContext();
         if (context == null || uri == null) {
             throw new FileNotFoundException("Ruta de archivo no válida");
@@ -77,12 +86,20 @@ public class ShareFileProvider extends ContentProvider {
                 throw new FileNotFoundException("Nombre de archivo no válido");
             }
             dir = new File(context.getCacheDir(), "updates");
+        } else if ("camera".equals(folder)) {
+            if (!name.matches("capture-[A-Za-z0-9_-]{1,64}\\.jpg")) {
+                throw new FileNotFoundException("Nombre de archivo no válido");
+            }
+            dir = new File(context.getCacheDir(), "camera");
+            if (allowMissing && !dir.exists()) {
+                dir.mkdirs();
+            }
         } else {
             throw new FileNotFoundException("Ruta de archivo no válida");
         }
 
         File target = new File(dir, name);
-        if (!target.exists() || !target.isFile()) {
+        if (!allowMissing && (!target.exists() || !target.isFile())) {
             throw new FileNotFoundException("Archivo no encontrado");
         }
         return target;
@@ -90,16 +107,19 @@ public class ShareFileProvider extends ContentProvider {
 
     @Override
     public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {
-        if (!"r".equals(mode)) {
+        boolean isCamera = uri != null && uri.getPathSegments().size() == 2 && "camera".equals(uri.getPathSegments().get(0));
+        if (!isCamera && !"r".equals(mode)) {
             throw new SecurityException("Solo lectura");
         }
-        return ParcelFileDescriptor.open(resolve(uri), ParcelFileDescriptor.MODE_READ_ONLY);
+        boolean writeMode = isCamera && mode != null && mode.contains("w");
+        int pfdMode = ParcelFileDescriptor.parseMode(mode != null ? mode : "r");
+        return ParcelFileDescriptor.open(resolve(uri, writeMode), pfdMode);
     }
 
     @Override
     public Cursor query(Uri uri, String[] projection, String selection, String[] selectionArgs, String sortOrder) {
         try {
-            File file = resolve(uri);
+            File file = resolve(uri, false);
             String[] cols = projection != null ? projection : new String[]{OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE};
             MatrixCursor cursor = new MatrixCursor(cols, 1);
             Object[] row = new Object[cols.length];

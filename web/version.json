@@ -1,11 +1,11 @@
 {
   "appName": "Notas",
-  "versionName": "1.6.0",
-  "versionCode": 7,
-  "webVersion": "1.6.5",
+  "versionName": "1.7.0",
+  "versionCode": 8,
+  "webVersion": "1.7.0",
   "minAndroidVersionCode": 7,
   "releaseDate": "2026-11-13",
-  "notes": "Inventario renovado: filtros reales por stock/categoría, tarjetas limpias en celular, vista previa de ganancia y ajuste rápido de existencias (v1.6.5).",
+  "notes": "Botón de cámara directo para tomar foto a tus productos tanto en celular como en PC (v1.7.0).",
   "webBaseUrl": "https://navi1896.github.io/notas-app/",
   "updateUrl": "https://navi1896.github.io/notas-app/version.json",
   "apkUrl": "https://github.com/navi1896/notas-app/releases/latest/download/Notas.apk"
