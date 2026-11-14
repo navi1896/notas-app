@@ -48,18 +48,22 @@ public class MainActivity extends Activity {
     private static final int CHOOSE_PRODUCT_IMAGE = 1001;
     private static final int CREATE_BACKUP = 1002;
     private static final int TAKE_PRODUCT_IMAGE = 1003;
-    private static final int BUNDLED_VERSION_CODE = 8;
-    private static final String BUNDLED_VERSION_NAME = "1.7.0";
+    private static final int BUNDLED_VERSION_CODE = 9;
+    private static final String BUNDLED_VERSION_NAME = "1.7.2";
     private static final String PREFS_NAME = "notas_local";
     private static final String KEY_STATE = "state";
     private static final String KEY_OTA_CODE = "ota_version_code";
     private static final String KEY_OTA_WEB = "ota_web_version";
+    private static final String KEY_PENDING_CAMERA_PATH = "camera_pending_path";
+    private static final String KEY_PENDING_CAMERA_DATA = "camera_pending_data";
+    private static final String KEY_TEMP_DRAFT = "temp_product_draft";
 
     private WebView webView;
     private ValueCallback<Uri[]> pendingImageChooser;
     private ValueCallback<Uri[]> pendingCameraChooser;
     private File pendingCameraFile;
     private String pendingBackup;
+    private volatile boolean webPageLoaded = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -92,6 +96,13 @@ public class MainActivity extends Activity {
         webView.addJavascriptInterface(new NotasBridge(), "NotasApp");
 
         webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                webPageLoaded = true;
+                view.evaluateJavascript("window.notasReceiveCameraResult && window.notasReceiveCameraResult()", null);
+            }
+
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request != null ? request.getUrl() : null;
@@ -202,16 +213,33 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void saveCameraPendingResult(String result) {
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_PENDING_CAMERA_DATA, result)
+                .commit();
+        runOnUiThread(() -> {
+            if (webView != null && webPageLoaded) {
+                webView.evaluateJavascript("window.notasReceiveCameraResult && window.notasReceiveCameraResult()", null);
+            }
+        });
+    }
+
     private void launchNativeCamera(ValueCallback<Uri[]> chooserCallback) {
         if (pendingCameraChooser != null) {
             pendingCameraChooser.onReceiveValue(null);
             pendingCameraChooser = null;
         }
         pendingCameraChooser = chooserCallback;
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         try {
             File dir = new File(getCacheDir(), "camera");
             if (!dir.exists()) dir.mkdirs();
             pendingCameraFile = new File(dir, "capture-" + System.currentTimeMillis() + ".jpg");
+            prefs.edit()
+                    .putString(KEY_PENDING_CAMERA_PATH, pendingCameraFile.getAbsolutePath())
+                    .remove(KEY_PENDING_CAMERA_DATA)
+                    .commit();
             Uri uri = ShareFileProvider.uriForCamera(this, pendingCameraFile);
             Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
             intent.putExtra(MediaStore.EXTRA_OUTPUT, uri);
@@ -223,11 +251,12 @@ public class MainActivity extends Activity {
                 pendingCameraFile.delete();
             }
             pendingCameraFile = null;
+            prefs.edit().remove(KEY_PENDING_CAMERA_PATH).commit();
             if (pendingCameraChooser != null) {
                 pendingCameraChooser.onReceiveValue(null);
                 pendingCameraChooser = null;
-            } else if (webView != null) {
-                webView.evaluateJavascript("window.notasOnCameraPhoto && window.notasOnCameraPhoto('')", null);
+            } else {
+                saveCameraPendingResult("ERR");
             }
             Toast.makeText(this, "No se pudo abrir la cámara", Toast.LENGTH_SHORT).show();
         }
@@ -291,8 +320,16 @@ public class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
 
         if (requestCode == TAKE_PRODUCT_IMAGE) {
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
             File photoFile = pendingCameraFile;
+            if (photoFile == null) {
+                String savedPath = prefs.getString(KEY_PENDING_CAMERA_PATH, "");
+                if (savedPath != null && !savedPath.isEmpty()) {
+                    photoFile = new File(savedPath);
+                }
+            }
             pendingCameraFile = null;
+            prefs.edit().remove(KEY_PENDING_CAMERA_PATH).commit();
             ValueCallback<Uri[]> chooser = pendingCameraChooser;
             pendingCameraChooser = null;
 
@@ -306,22 +343,42 @@ public class MainActivity extends Activity {
                 return;
             }
 
-            if (resultCode != RESULT_OK || photoFile == null || !photoFile.exists() || photoFile.length() == 0) {
+            if (resultCode != RESULT_OK) {
                 if (photoFile != null && photoFile.exists()) photoFile.delete();
-                if (webView != null) {
-                    webView.evaluateJavascript("window.notasOnCameraPhoto && window.notasOnCameraPhoto('')", null);
-                }
+                saveCameraPendingResult("CANCELLED");
+                return;
+            }
+
+            final File targetFile = photoFile;
+            final Bitmap fallbackThumb = (data != null && data.getExtras() != null && data.getExtras().get("data") instanceof Bitmap)
+                    ? (Bitmap) data.getExtras().get("data")
+                    : null;
+
+            if ((targetFile == null || !targetFile.exists() || targetFile.length() == 0) && fallbackThumb == null) {
+                if (targetFile != null && targetFile.exists()) targetFile.delete();
+                saveCameraPendingResult("ERR");
                 return;
             }
 
             new Thread(() -> {
-                String dataUrl = encodeCapturedBitmap(photoFile);
-                photoFile.delete();
-                runOnUiThread(() -> {
-                    if (webView != null) {
-                        webView.evaluateJavascript("window.notasOnCameraPhoto && window.notasOnCameraPhoto(" + JSONObject.quote(dataUrl) + ")", null);
-                    }
-                });
+                String dataUrl = "";
+                if (targetFile != null && targetFile.exists() && targetFile.length() > 0) {
+                    dataUrl = encodeCapturedBitmap(targetFile);
+                    targetFile.delete();
+                } else if (fallbackThumb != null) {
+                    Bitmap square = Bitmap.createBitmap(320, 320, Bitmap.Config.ARGB_8888);
+                    Canvas canvas = new Canvas(square);
+                    canvas.drawColor(Color.WHITE);
+                    float scale = Math.min(320f / fallbackThumb.getWidth(), 320f / fallbackThumb.getHeight());
+                    float w = Math.max(1f, fallbackThumb.getWidth() * scale);
+                    float h = Math.max(1f, fallbackThumb.getHeight() * scale);
+                    canvas.drawBitmap(fallbackThumb, null, new android.graphics.RectF((320f - w) / 2f, (320f - h) / 2f, (320f + w) / 2f, (320f + h) / 2f), new Paint(Paint.FILTER_BITMAP_FLAG));
+                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                    square.compress(Bitmap.CompressFormat.JPEG, 72, baos);
+                    square.recycle();
+                    dataUrl = "data:image/jpeg;base64," + Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP);
+                }
+                saveCameraPendingResult(dataUrl.isEmpty() ? "ERR" : dataUrl);
             }).start();
             return;
         }
@@ -659,6 +716,33 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void takeProductPhoto() {
             runOnUiThread(() -> launchNativeCamera(null));
+        }
+
+        @JavascriptInterface
+        public String consumePendingCameraPhoto() {
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            String result = prefs.getString(KEY_PENDING_CAMERA_DATA, "");
+            if (result != null && !result.isEmpty()) {
+                prefs.edit().remove(KEY_PENDING_CAMERA_DATA).commit();
+                return result;
+            }
+            return "";
+        }
+
+        @JavascriptInterface
+        public void saveTempDraft(String value) {
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            if (value == null || value.isEmpty()) {
+                prefs.edit().remove(KEY_TEMP_DRAFT).commit();
+            } else {
+                prefs.edit().putString(KEY_TEMP_DRAFT, value).commit();
+            }
+        }
+
+        @JavascriptInterface
+        public String loadTempDraft() {
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            return prefs.getString(KEY_TEMP_DRAFT, "");
         }
 
         @JavascriptInterface

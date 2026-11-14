@@ -1,4 +1,4 @@
-const CACHE = 'notas-shell-v11';
+const CACHE = 'notas-shell-v13';
 const FILES = [
   './',
   './index.html',
