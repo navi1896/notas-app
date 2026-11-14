@@ -1,0 +1,742 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model ("Notas" Multi-Device POS & Inventory App)
+// ===============================================================
+//
+// Collection: users
+// Document ID: {uid}
+// Fields:
+//   - uid: string (required, immutable, == uid, max 128)
+//   - email: string (optional, max 254)
+//   - displayName: string (optional, max 120)
+//   - activeStoreId: string | null (optional, max 128)
+//   - storeIds: list (required, max 20 items)
+//   - updatedAt: number | timestamp (required)
+//
+// Collection: invites
+// Document ID: {code}
+// Fields:
+//   - code: string (required, immutable, == code, 4..64 chars)
+//   - storeId: string (required, immutable, 1..128 chars)
+//   - storeName: string (required, 1..120 chars)
+//   - role: string (required, immutable on redeem, 'owner' | 'seller')
+//   - active: bool (required)
+//   - usedBy: string | null (required, null on create, uid on redeem)
+//   - usedAt: number | timestamp | null (optional)
+//   - createdBy: string (required, immutable, == request.auth.uid on create)
+//   - createdAt: number | timestamp (required, immutable)
+//
+// Collection: stores
+// Document ID: {storeId}
+// Fields:
+//   - id: string (required, immutable, == storeId, 1..128 chars)
+//   - business: string (required, 1..120 chars)
+//   - currency: string (required, 1..10 chars)
+//   - address: string (optional, max 250)
+//   - phone: string (optional, max 40)
+//   - email: string (optional, max 254)
+//   - registration: string (optional, max 80)
+//   - seller: string (optional, max 120)
+//   - ownerUid: string (required, immutable, == request.auth.uid on create)
+//   - saleSequence: int (required, >= 1)
+//   - createdAt: number | timestamp (optional, immutable)
+//   - updatedAt: number | timestamp (optional)
+//
+// Subcollection: stores/{storeId}/members
+// Document ID: {uid}
+// Fields:
+//   - uid: string (required, immutable, == uid, 1..128 chars)
+//   - email: string (optional, max 254)
+//   - name: string (optional, max 120)
+//   - role: string (required, 'owner' | 'seller')
+//   - active: bool (required)
+//   - joinedAt: number | timestamp (required, immutable)
+//   - inviteCode: string | null (optional, immutable, 4..64 chars)
+//   - updatedAt: number | timestamp (optional)
+//
+// Subcollection: stores/{storeId}/products (NO 'cost' field)
+// Document ID: {productId}
+// Fields:
+//   - id: string (required, immutable, == productId, 1..128 chars)
+//   - name: string (required, 1..160 chars)
+//   - category: string (optional, max 80)
+//   - price: number (required, >= 0)
+//   - stock: number (required, >= 0)
+//   - min: number (optional, >= 0)
+//   - emoji: string (optional, max 16)
+//   - photo: string (optional, max 500000)
+//   - createdAt: number | timestamp (optional, immutable)
+//   - updatedAt: number | timestamp (optional)
+//
+// Subcollection: stores/{storeId}/productCosts (owner-only sensitive unit costs)
+// Document ID: {productId}
+// Fields:
+//   - id: string (optional, immutable, == productId)
+//   - productId: string (optional, immutable, == productId)
+//   - cost: number (required, >= 0)
+//   - createdAt: number | timestamp (optional, immutable)
+//   - updatedAt: number | timestamp (optional)
+//
+// Subcollection: stores/{storeId}/expenses (owner-only)
+// Document ID: {expenseId}
+// Fields:
+//   - id: string (required, immutable, == expenseId, 1..128 chars)
+//   - date: string (required, 1..32 chars)
+//   - name: string (required, 1..160 chars)
+//   - category: string (optional, max 80)
+//   - amount: number (required, >= 0)
+//   - payment: string (optional, max 60)
+//   - notes: string (optional, max 1000)
+//   - createdAt: number | timestamp (optional, immutable)
+//   - updatedAt: number | timestamp (optional)
+//
+// Subcollection: stores/{storeId}/suppliers (owner-only)
+// Document ID: {supplierId}
+// Fields:
+//   - id: string (required, immutable, == supplierId, 1..128 chars)
+//   - name: string (required, 1..160 chars)
+//   - phone: string (optional, max 40)
+//   - email: string (optional, max 254)
+//   - notes: string (optional, max 1000)
+//   - createdAt: number | timestamp (optional, immutable)
+//   - updatedAt: number | timestamp (optional)
+//
+// Subcollection: stores/{storeId}/customers
+// Document ID: {customerId}
+// Fields:
+//   - id: string (required, immutable, == customerId, 1..128 chars)
+//   - name: string (required, 1..160 chars)
+//   - phone: string (optional, max 40)
+//   - email: string (optional, max 254)
+//   - notes: string (optional, max 1000)
+//   - createdAt: number | timestamp (optional, immutable)
+//   - updatedAt: number | timestamp (optional)
+//
+// Subcollection: stores/{storeId}/sales
+// Document ID: {saleId}
+// Fields:
+//   - id: string (required, immutable, == saleId, 1..128 chars)
+//   - folio: string (optional, max 32)
+//   - date: string (required, 1..32 chars)
+//   - time: string (optional, max 32)
+//   - seller: string (optional, max 120)
+//   - sellerUid: string (optional, immutable, == request.auth.uid on seller create)
+//   - items: list (optional, max 200 items)
+//   - product: string (optional, max 200)
+//   - productId: string (optional, max 128)
+//   - qty: number (optional, >= 0)
+//   - unitPrice: number (optional, >= 0)
+//   - total: number (required, >= 0)
+//   - customer: string (optional, max 160)
+//   - payment: string (required, 1..60 chars)
+//   - paid: number (required, >= 0 and <= total)
+//   - payments: list (optional, max 100 items)
+//   - createdAt: number | timestamp (optional, immutable)
+//   - updatedAt: number | timestamp (optional)
+//
+// Collection: catalog (public buyer share link metadata - NO PII)
+// Document ID: {storeId}
+// Fields:
+//   - storeId: string (required, == storeId, 1..128 chars)
+//   - business: string (required, 1..120 chars)
+//   - phone: string (optional, max 40)
+//   - currency: string (required, 1..10 chars)
+//   - updatedAt: number | timestamp (optional)
+//
+// Subcollection: catalog/{storeId}/items (public buyer items - NO cost/PII)
+// Document ID: {productId}
+// Fields:
+//   - id: string (required, immutable, == productId, 1..128 chars)
+//   - name: string (required, 1..160 chars)
+//   - category: string (optional, max 80)
+//   - price: number (required, >= 0)
+//   - available: bool (required)
+//   - emoji: string (optional, max 16)
+//   - photo: string (optional, max 500000)
+//   - updatedAt: number | timestamp (optional)
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Core Auth & Membership Helpers
+    // ===============================================================
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function memberPath(storeId) {
+      return /databases/$(database)/documents/stores/$(storeId)/members/$(request.auth.uid);
+    }
+
+    function memberDoc(storeId) {
+      return get(memberPath(storeId));
+    }
+
+    function isActiveMember(storeId) {
+      return isSignedIn()
+        && exists(memberPath(storeId))
+        && memberDoc(storeId).data.active == true
+        && memberDoc(storeId).data.role in ['owner', 'seller'];
+    }
+
+    function isOwner(storeId) {
+      return isActiveMember(storeId) && memberDoc(storeId).data.role == 'owner';
+    }
+
+    function isSeller(storeId) {
+      return isActiveMember(storeId) && memberDoc(storeId).data.role == 'seller';
+    }
+
+    // ===============================================================
+    // Generic Validation Helpers
+    // ===============================================================
+
+    function isValidTimestampOrNumber(val) {
+      return val is timestamp || (val is number && val >= 0);
+    }
+
+    function isOptionalString(data, field, maxLen) {
+      return !(field in data)
+        || (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    function isRequiredString(data, field, minLen, maxLen) {
+      return field in data
+        && data[field] is string
+        && data[field].size() >= minLen
+        && data[field].size() <= maxLen;
+    }
+
+    function isOptionalNonNegativeNumber(data, field) {
+      return !(field in data)
+        || (data[field] is number && data[field] >= 0);
+    }
+
+    function isOptionalTimestampOrNumber(data, field) {
+      return !(field in data) || isValidTimestampOrNumber(data[field]);
+    }
+
+    function isImmutableIfPresent(field) {
+      return !(field in resource.data)
+        || (field in request.resource.data
+            && request.resource.data[field] == resource.data[field]);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data, uid) {
+      return data.keys().hasOnly([
+          'uid', 'email', 'displayName', 'activeStoreId', 'storeIds', 'updatedAt'
+        ])
+        && data.keys().hasAll(['uid', 'storeIds', 'updatedAt'])
+        && data.uid is string
+        && data.uid == uid
+        && data.uid.size() > 0 && data.uid.size() <= 128
+        && isOptionalString(data, 'email', 254)
+        && isOptionalString(data, 'displayName', 120)
+        && (!('activeStoreId' in data)
+            || data.activeStoreId == null
+            || (data.activeStoreId is string
+                && data.activeStoreId.size() > 0
+                && data.activeStoreId.size() <= 128))
+        && data.storeIds is list
+        && data.storeIds.size() <= 20
+        && isValidTimestampOrNumber(data.updatedAt);
+    }
+
+    function isValidInviteCommon(data, code) {
+      return data.keys().hasOnly([
+          'code', 'storeId', 'storeName', 'role', 'active',
+          'usedBy', 'usedAt', 'createdBy', 'createdAt'
+        ])
+        && data.keys().hasAll([
+          'code', 'storeId', 'storeName', 'role', 'active',
+          'usedBy', 'createdBy', 'createdAt'
+        ])
+        && isRequiredString(data, 'code', 4, 64)
+        && data.code == code
+        && isRequiredString(data, 'storeId', 1, 128)
+        && isRequiredString(data, 'storeName', 1, 120)
+        && data.role in ['owner', 'seller']
+        && data.active is bool
+        && (data.usedBy == null
+            || (data.usedBy is string
+                && data.usedBy.size() > 0
+                && data.usedBy.size() <= 128))
+        && (!('usedAt' in data)
+            || data.usedAt == null
+            || isValidTimestampOrNumber(data.usedAt))
+        && isRequiredString(data, 'createdBy', 1, 128)
+        && isValidTimestampOrNumber(data.createdAt);
+    }
+
+    function isValidStore(data, storeId) {
+      return data.keys().hasOnly([
+          'id', 'business', 'currency', 'address', 'phone', 'email',
+          'registration', 'seller', 'ownerUid', 'saleSequence',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasAll([
+          'id', 'business', 'currency', 'ownerUid', 'saleSequence'
+        ])
+        && isRequiredString(data, 'id', 1, 128)
+        && data.id == storeId
+        && isRequiredString(data, 'business', 1, 120)
+        && isRequiredString(data, 'currency', 1, 10)
+        && isOptionalString(data, 'address', 250)
+        && isOptionalString(data, 'phone', 40)
+        && isOptionalString(data, 'email', 254)
+        && isOptionalString(data, 'registration', 80)
+        && isOptionalString(data, 'seller', 120)
+        && isRequiredString(data, 'ownerUid', 1, 128)
+        && data.saleSequence is int
+        && data.saleSequence >= 1
+        && isOptionalTimestampOrNumber(data, 'createdAt')
+        && isOptionalTimestampOrNumber(data, 'updatedAt');
+    }
+
+    function isValidMember(data, uid) {
+      return data.keys().hasOnly([
+          'uid', 'email', 'name', 'role', 'active',
+          'joinedAt', 'inviteCode', 'updatedAt'
+        ])
+        && data.keys().hasAll(['uid', 'role', 'active', 'joinedAt'])
+        && isRequiredString(data, 'uid', 1, 128)
+        && data.uid == uid
+        && isOptionalString(data, 'email', 254)
+        && isOptionalString(data, 'name', 120)
+        && data.role in ['owner', 'seller']
+        && data.active is bool
+        && isValidTimestampOrNumber(data.joinedAt)
+        && (!('inviteCode' in data)
+            || data.inviteCode == null
+            || (data.inviteCode is string
+                && data.inviteCode.size() >= 4
+                && data.inviteCode.size() <= 64))
+        && isOptionalTimestampOrNumber(data, 'updatedAt');
+    }
+
+    function isBootstrapOwnerMember(storeId, uid) {
+      let storePath = /databases/$(database)/documents/stores/$(storeId);
+      return request.resource.data.role == 'owner'
+        && existsAfter(storePath)
+        && getAfter(storePath).data.ownerUid == uid;
+    }
+
+    function isRedeemingInviteMember(storeId, uid) {
+      return request.resource.data.inviteCode is string
+        && request.resource.data.inviteCode.size() >= 4
+        && request.resource.data.inviteCode.size() <= 64
+        && exists(/databases/$(database)/documents/invites/$(request.resource.data.inviteCode))
+        && get(/databases/$(database)/documents/invites/$(request.resource.data.inviteCode)).data.active == true
+        && get(/databases/$(database)/documents/invites/$(request.resource.data.inviteCode)).data.storeId == storeId
+        && get(/databases/$(database)/documents/invites/$(request.resource.data.inviteCode)).data.role == request.resource.data.role
+        && existsAfter(/databases/$(database)/documents/invites/$(request.resource.data.inviteCode))
+        && getAfter(/databases/$(database)/documents/invites/$(request.resource.data.inviteCode)).data.usedBy == uid
+        && getAfter(/databases/$(database)/documents/invites/$(request.resource.data.inviteCode)).data.active == false;
+    }
+
+    function isValidProduct(data, productId) {
+      return data.keys().hasOnly([
+          'id', 'name', 'category', 'price', 'stock',
+          'min', 'emoji', 'photo', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasAll(['id', 'name', 'price', 'stock'])
+        && !('cost' in data)
+        && isRequiredString(data, 'id', 1, 128)
+        && data.id == productId
+        && isRequiredString(data, 'name', 1, 160)
+        && isOptionalString(data, 'category', 80)
+        && data.price is number && data.price >= 0
+        && data.stock is number && data.stock >= 0
+        && isOptionalNonNegativeNumber(data, 'min')
+        && isOptionalString(data, 'emoji', 16)
+        && isOptionalString(data, 'photo', 500000)
+        && isOptionalTimestampOrNumber(data, 'createdAt')
+        && isOptionalTimestampOrNumber(data, 'updatedAt');
+    }
+
+    function isValidProductCost(data, productId) {
+      return data.keys().hasOnly([
+          'id', 'productId', 'cost', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasAll(['cost'])
+        && (!('id' in data) || (data.id is string && data.id == productId))
+        && (!('productId' in data) || (data.productId is string && data.productId == productId))
+        && data.cost is number && data.cost >= 0
+        && isOptionalTimestampOrNumber(data, 'createdAt')
+        && isOptionalTimestampOrNumber(data, 'updatedAt');
+    }
+
+    function isValidExpense(data, expenseId) {
+      return data.keys().hasOnly([
+          'id', 'date', 'name', 'category', 'amount',
+          'payment', 'notes', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasAll(['id', 'date', 'name', 'amount'])
+        && isRequiredString(data, 'id', 1, 128)
+        && data.id == expenseId
+        && isRequiredString(data, 'date', 1, 32)
+        && isRequiredString(data, 'name', 1, 160)
+        && isOptionalString(data, 'category', 80)
+        && data.amount is number && data.amount >= 0
+        && isOptionalString(data, 'payment', 60)
+        && isOptionalString(data, 'notes', 1000)
+        && isOptionalTimestampOrNumber(data, 'createdAt')
+        && isOptionalTimestampOrNumber(data, 'updatedAt');
+    }
+
+    function isValidContact(data, contactId) {
+      return data.keys().hasOnly([
+          'id', 'name', 'phone', 'email', 'notes', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasAll(['id', 'name'])
+        && isRequiredString(data, 'id', 1, 128)
+        && data.id == contactId
+        && isRequiredString(data, 'name', 1, 160)
+        && isOptionalString(data, 'phone', 40)
+        && isOptionalString(data, 'email', 254)
+        && isOptionalString(data, 'notes', 1000)
+        && isOptionalTimestampOrNumber(data, 'createdAt')
+        && isOptionalTimestampOrNumber(data, 'updatedAt');
+    }
+
+    function isValidSale(data, saleId) {
+      return data.keys().hasOnly([
+          'id', 'folio', 'date', 'time', 'seller', 'sellerUid',
+          'items', 'product', 'productId', 'qty', 'unitPrice',
+          'total', 'customer', 'payment', 'paid', 'payments',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasAll(['id', 'date', 'total', 'payment', 'paid'])
+        && isRequiredString(data, 'id', 1, 128)
+        && data.id == saleId
+        && isOptionalString(data, 'folio', 32)
+        && isRequiredString(data, 'date', 1, 32)
+        && isOptionalString(data, 'time', 32)
+        && isOptionalString(data, 'seller', 120)
+        && isOptionalString(data, 'sellerUid', 128)
+        && (!('items' in data) || (data.items is list && data.items.size() <= 200))
+        && isOptionalString(data, 'product', 200)
+        && isOptionalString(data, 'productId', 128)
+        && isOptionalNonNegativeNumber(data, 'qty')
+        && isOptionalNonNegativeNumber(data, 'unitPrice')
+        && data.total is number && data.total >= 0
+        && isOptionalString(data, 'customer', 160)
+        && isRequiredString(data, 'payment', 1, 60)
+        && data.paid is number && data.paid >= 0 && data.paid <= data.total
+        && (!('payments' in data) || (data.payments is list && data.payments.size() <= 100))
+        && isOptionalTimestampOrNumber(data, 'createdAt')
+        && isOptionalTimestampOrNumber(data, 'updatedAt');
+    }
+
+    function isValidCatalogStore(data, storeId) {
+      return data.keys().hasOnly([
+          'storeId', 'business', 'phone', 'currency', 'updatedAt'
+        ])
+        && data.keys().hasAll(['storeId', 'business', 'currency'])
+        && isRequiredString(data, 'storeId', 1, 128)
+        && data.storeId == storeId
+        && isRequiredString(data, 'business', 1, 120)
+        && isOptionalString(data, 'phone', 40)
+        && isRequiredString(data, 'currency', 1, 10)
+        && isOptionalTimestampOrNumber(data, 'updatedAt');
+    }
+
+    function isValidCatalogItem(data, productId) {
+      return data.keys().hasOnly([
+          'id', 'name', 'category', 'price', 'available',
+          'emoji', 'photo', 'updatedAt'
+        ])
+        && data.keys().hasAll(['id', 'name', 'price', 'available'])
+        && !('cost' in data)
+        && isRequiredString(data, 'id', 1, 128)
+        && data.id == productId
+        && isRequiredString(data, 'name', 1, 160)
+        && isOptionalString(data, 'category', 80)
+        && data.price is number && data.price >= 0
+        && data.available is bool
+        && isOptionalString(data, 'emoji', 16)
+        && isOptionalString(data, 'photo', 500000)
+        && isOptionalTimestampOrNumber(data, 'updatedAt');
+    }
+
+    // ===============================================================
+    // 1. User Profiles (Strict Self-Only Access)
+    // ===============================================================
+
+    match /users/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow create: if isSignedIn()
+        && request.auth.uid == uid
+        && isValidUser(request.resource.data, uid);
+      allow update: if isSignedIn()
+        && request.auth.uid == uid
+        && isValidUser(request.resource.data, uid)
+        && request.resource.data.uid == resource.data.uid;
+      allow delete: if isSignedIn() && request.auth.uid == uid;
+    }
+
+    // ===============================================================
+    // 2. Single-Use Store Invites
+    // ===============================================================
+
+    match /invites/{code} {
+      // Anyone signed-in who knows the code can inspect it to accept
+      allow get: if isSignedIn();
+      // Only active owners of that store can list invites
+      allow list: if isSignedIn() && isOwner(resource.data.storeId);
+
+      allow create: if isSignedIn()
+        && isOwner(request.resource.data.storeId)
+        && isValidInviteCommon(request.resource.data, code)
+        && request.resource.data.active == true
+        && request.resource.data.usedBy == null
+        && (!('usedAt' in request.resource.data) || request.resource.data.usedAt == null)
+        && request.resource.data.createdBy == request.auth.uid;
+
+      allow update: if isSignedIn()
+        && isValidInviteCommon(request.resource.data, code)
+        && request.resource.data.code == resource.data.code
+        && request.resource.data.storeId == resource.data.storeId
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.createdAt == resource.data.createdAt
+        && (
+          // Active owner managing/revoking the invite
+          isOwner(resource.data.storeId)
+          // Or atomic single-use redemption by a signed-in user
+          || (
+            resource.data.active == true
+            && resource.data.usedBy == null
+            && request.resource.data.active == false
+            && request.resource.data.usedBy == request.auth.uid
+            && request.resource.data.role == resource.data.role
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['active', 'usedBy', 'usedAt'])
+          )
+        );
+
+      allow delete: if isSignedIn() && isOwner(resource.data.storeId);
+    }
+
+    // ===============================================================
+    // 3. Stores & Store Subcollections
+    // ===============================================================
+
+    match /stores/{storeId} {
+      allow read: if isSignedIn()
+        && (resource.data.ownerUid == request.auth.uid || isActiveMember(storeId));
+
+      allow create: if isSignedIn()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.id == storeId
+        && isValidStore(request.resource.data, storeId);
+
+      allow update: if isValidStore(request.resource.data, storeId)
+        && request.resource.data.id == resource.data.id
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && isImmutableIfPresent('createdAt')
+        && (
+          isOwner(storeId)
+          || (
+            isSeller(storeId)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['saleSequence', 'updatedAt'])
+            && request.resource.data.saleSequence is int
+            && request.resource.data.saleSequence >= 1
+          )
+        );
+
+      allow delete: if isOwner(storeId);
+
+      // 4. Store Members
+      match /members/{uid} {
+        allow read: if isActiveMember(storeId)
+          || (isSignedIn() && request.auth.uid == uid);
+
+        allow create: if isValidMember(request.resource.data, uid)
+          && (
+            isOwner(storeId)
+            || (
+              isSignedIn()
+              && request.auth.uid == uid
+              && request.resource.data.uid == uid
+              && request.resource.data.active == true
+              && (
+                isBootstrapOwnerMember(storeId, uid)
+                || isRedeemingInviteMember(storeId, uid)
+              )
+            )
+          );
+
+        allow update: if isValidMember(request.resource.data, uid)
+          && request.resource.data.uid == resource.data.uid
+          && request.resource.data.joinedAt == resource.data.joinedAt
+          && isImmutableIfPresent('inviteCode')
+          && (
+            isOwner(storeId)
+            || (
+              isSignedIn()
+              && request.auth.uid == uid
+              && request.resource.data.role == resource.data.role
+              && request.resource.data.active == resource.data.active
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'email', 'updatedAt'])
+            )
+          );
+
+        // Owner cannot delete themselves to prevent orphaning the store
+        allow delete: if isOwner(storeId) && request.auth.uid != uid;
+      }
+
+      // 5. Products (Public-to-store fields only; unit costs isolated in productCosts)
+      match /products/{productId} {
+        allow read: if isActiveMember(storeId);
+
+        allow create: if isOwner(storeId)
+          && isValidProduct(request.resource.data, productId);
+
+        allow update: if isValidProduct(request.resource.data, productId)
+          && request.resource.data.id == resource.data.id
+          && isImmutableIfPresent('createdAt')
+          && (
+            isOwner(storeId)
+            || (
+              isSeller(storeId)
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stock', 'updatedAt'])
+              && request.resource.data.stock is number
+              && request.resource.data.stock >= 0
+            )
+          );
+
+        allow delete: if isOwner(storeId);
+      }
+
+      // 6. Product Costs (Strictly Owner-Only)
+      match /productCosts/{productId} {
+        allow read: if isOwner(storeId);
+        allow create: if isOwner(storeId)
+          && isValidProductCost(request.resource.data, productId);
+        allow update: if isOwner(storeId)
+          && isValidProductCost(request.resource.data, productId)
+          && isImmutableIfPresent('id')
+          && isImmutableIfPresent('productId')
+          && isImmutableIfPresent('createdAt');
+        allow delete: if isOwner(storeId);
+      }
+
+      // 7a. Expenses (Strictly Owner-Only)
+      match /expenses/{expenseId} {
+        allow read: if isOwner(storeId);
+        allow create: if isOwner(storeId)
+          && isValidExpense(request.resource.data, expenseId);
+        allow update: if isOwner(storeId)
+          && isValidExpense(request.resource.data, expenseId)
+          && request.resource.data.id == resource.data.id
+          && isImmutableIfPresent('createdAt');
+        allow delete: if isOwner(storeId);
+      }
+
+      // 7b. Suppliers (Strictly Owner-Only)
+      match /suppliers/{supplierId} {
+        allow read: if isOwner(storeId);
+        allow create: if isOwner(storeId)
+          && isValidContact(request.resource.data, supplierId);
+        allow update: if isOwner(storeId)
+          && isValidContact(request.resource.data, supplierId)
+          && request.resource.data.id == resource.data.id
+          && isImmutableIfPresent('createdAt');
+        allow delete: if isOwner(storeId);
+      }
+
+      // 8. Customers (Owner & Seller can read/create/update; Owner-only delete)
+      match /customers/{customerId} {
+        allow read: if isActiveMember(storeId);
+        allow create: if isActiveMember(storeId)
+          && isValidContact(request.resource.data, customerId);
+        allow update: if isActiveMember(storeId)
+          && isValidContact(request.resource.data, customerId)
+          && request.resource.data.id == resource.data.id
+          && isImmutableIfPresent('createdAt');
+        allow delete: if isOwner(storeId);
+      }
+
+      // 9. Sales (Owner full access; Seller create + payment/abono updates only)
+      match /sales/{saleId} {
+        allow read: if isActiveMember(storeId);
+
+        allow create: if isActiveMember(storeId)
+          && isValidSale(request.resource.data, saleId)
+          && (
+            isOwner(storeId)
+            || (
+              isSeller(storeId)
+              && request.resource.data.sellerUid == request.auth.uid
+            )
+          );
+
+        allow update: if isValidSale(request.resource.data, saleId)
+          && request.resource.data.id == resource.data.id
+          && isImmutableIfPresent('createdAt')
+          && isImmutableIfPresent('sellerUid')
+          && (
+            isOwner(storeId)
+            || (
+              isSeller(storeId)
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                'paid', 'payment', 'payments', 'updatedAt'
+              ])
+            )
+          );
+
+        allow delete: if isOwner(storeId);
+      }
+    }
+
+    // ===============================================================
+    // 10. Public Buyer Catalog (Read-only for buyers via share link)
+    // ===============================================================
+
+    match /catalog/{storeId} {
+      // Explicitly public per product requirement: contains only non-sensitive storefront info
+      allow read: if true;
+      allow create: if isOwner(storeId)
+        && isValidCatalogStore(request.resource.data, storeId);
+      allow update: if isOwner(storeId)
+        && isValidCatalogStore(request.resource.data, storeId)
+        && request.resource.data.storeId == resource.data.storeId;
+      allow delete: if isOwner(storeId);
+
+      match /items/{productId} {
+        // Explicitly public per product requirement: contains NO cost or private data
+        allow read: if true;
+        allow create: if isOwner(storeId)
+          && isValidCatalogItem(request.resource.data, productId);
+        allow update: if isValidCatalogItem(request.resource.data, productId)
+          && request.resource.data.id == resource.data.id
+          && (
+            isOwner(storeId)
+            || (
+              isSeller(storeId)
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                'available', 'updatedAt'
+              ])
+            )
+          );
+        allow delete: if isOwner(storeId);
+      }
+    }
+
+    // ===============================================================
+    // Default Deny Fallback
+    // ===============================================================
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

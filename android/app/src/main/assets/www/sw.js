@@ -1,4 +1,4 @@
-const CACHE = 'notas-shell-v16';
+const CACHE = 'notas-shell-v17';
 const FILES = [
   './',
   './index.html',
@@ -29,6 +29,18 @@ self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
 
   const url = new URL(event.request.url);
+  if (url.href.startsWith('https://www.gstatic.com/firebasejs/')) {
+    event.respondWith(
+      caches.match(event.request).then((cached) => cached || fetch(event.request).then((response) => {
+        if (response && response.ok) {
+          const copy = response.clone();
+          caches.open(CACHE).then((cache) => cache.put(event.request, copy));
+        }
+        return response;
+      }))
+    );
+    return;
+  }
   if (url.origin !== self.location.origin) return;
 
   // Network-first para detectar nuevas versiones automáticamente en PC/PWA y caer a caché offline

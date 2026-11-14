@@ -1,11 +1,11 @@
 {
   "appName": "Notas",
-  "versionName": "1.7.5",
+  "versionName": "1.8.0",
   "versionCode": 9,
-  "webVersion": "1.7.5",
+  "webVersion": "1.8.0",
   "minAndroidVersionCode": 7,
   "releaseDate": "2026-11-13",
-  "notes": "Rediseño compacto de tarjetas en Stock: corrige el encimado de nombre y foto, muestra precio limpio y separa los botones en una barra inferior (v1.7.5).",
+  "notes": "Sincronización en tiempo real en la nube con Firebase, roles de Dueño y Vendedor con invitaciones, y enlace de catálogo público en vivo para compradores (v1.8.0).",
   "webBaseUrl": "https://navi1896.github.io/notas-app/",
   "updateUrl": "https://navi1896.github.io/notas-app/version.json",
   "apkUrl": "https://github.com/navi1896/notas-app/releases/latest/download/Notas.apk"

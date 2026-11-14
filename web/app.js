@@ -21,7 +21,446 @@
     state.saleSequence=Math.max(Number(state.saleSequence)||1,...state.sales.map(sale=>(Number(sale.folio)||0)+1));
     let page='inicio',search='',saleFilter='all',stockFilter='all',invCategory='Todas',invPhotoSize=(()=>{try{return localStorage.getItem('notas-inv-photo-size')||'md'}catch{return 'md'}})(),period='30',modal=null,toastTimer,saleDraft=[],saleStep='pick',saleSearch='',saleCategory='Todas',saleMeta={},productPhotoDraft=null,productFormDraft=null,returnToSale=null,photoBusy=false,cameraStream=null,updateInfo=null,swRegistration=null;
     const DRAFT_KEY='notas-product-draft-v1';
-    const APP_LOCAL_VERSION=(()=>{try{const info=window.NotasApp?.getAppVersion?.();if(info)return JSON.parse(info)}catch{}return {versionCode:9,versionName:'1.7.5',webVersion:'1.7.5',platform:'web'}})();
+    const CLOUD_CACHE_PREFIX='notas-cloud-cache-v1-';
+    const PUBLIC_CATALOG_BASE='https://navi1896.github.io/notas-app/';
+    const FIREBASE_CONFIG={
+      projectId:'notas-96ef7',
+      appId:'1:1002701021775:web:cfce3554fe45f634e4403a',
+      storageBucket:'notas-96ef7.firebasestorage.app',
+      apiKey:'AIzaSyCy7j66RTZPKu1r0JfWqZukLCb7FW1-pyw',
+      authDomain:'notas-96ef7.firebaseapp.com',
+      messagingSenderId:'1002701021775',
+      measurementId:'G-787ZQ138B2'
+    };
+    const APP_LOCAL_VERSION=(()=>{try{const info=window.NotasApp?.getAppVersion?.();if(info)return JSON.parse(info)}catch{}return {versionCode:9,versionName:'1.8.0',webVersion:'1.8.0',platform:'web'}})();
+    const initialCatalogParam=(()=>{try{const u=new URL(location.href);const q=u.searchParams.get('catalogo')||u.searchParams.get('catalog')||'';if(q)return q.trim();const h=location.hash||'';const m=h.match(/catalogo=([a-zA-Z0-9_-]+)/);return m?m[1]:''}catch{return ''}})();
+    let cloud={
+      sdkLoaded:false,sdkError:'',app:null,auth:null,db:null,fb:null,
+      authReady:false,user:null,profile:null,
+      storeId:null,role:null,member:null,members:[],invites:[],
+      costsByProduct:{},unsubs:[],syncing:false,busy:false,
+      authMode:'login',onboardMode:'create',onboardingForced:false,
+      publicStoreId:initialCatalogParam,publicStore:null,publicItems:[],publicCart:{},publicLoading:Boolean(initialCatalogParam),publicError:'',publicCategory:'Todas',publicViaLink:Boolean(initialCatalogParam)
+    };
+    const isCloudActive=()=>Boolean(cloud.user&&cloud.storeId&&cloud.role);
+    const isOwnerRole=()=>!isCloudActive()||cloud.role==='owner';
+    const isSellerRole=()=>isCloudActive()&&cloud.role==='seller';
+    const canManageStore=()=>isOwnerRole();
+    const canAdjustStock=()=>!isCloudActive()||cloud.role==='owner'||cloud.role==='seller';
+    const cloudRoleLabel=()=>!cloud.user?'Modo local':!cloud.storeId?'Sin negocio':cloud.role==='owner'?'Dueño':'Vendedor';
+    const catalogUrlFor=(sid)=>`${PUBLIC_CATALOG_BASE}?catalogo=${encodeURIComponent(sid||cloud.storeId||'')}`;
+    function resolvePortablePhoto(p){
+      let photo=p?.photo||'';
+      if((photo.startsWith('content://')||photo.startsWith('file://'))&&window.NotasApp?.loadProductImage){
+        try{photo=window.NotasApp.loadProductImage(p.id)||''}catch{photo=''}
+      }
+      if(photo.length>480000)return '';
+      return photo;
+    }
+    function applyLocalState(parsed){
+      const next=parsed||seed();
+      state={
+        settings:{business:'Mi negocio',currency:'MXN',address:'',phone:'',email:'',registration:'',seller:'',...(next.settings||{})},
+        products:Array.isArray(next.products)?next.products:[],
+        customers:Array.isArray(next.customers)?next.customers:[],
+        suppliers:Array.isArray(next.suppliers)?next.suppliers:[],
+        sales:Array.isArray(next.sales)?next.sales:[],
+        expenses:Array.isArray(next.expenses)?next.expenses:[],
+        saleSequence:Number(next.saleSequence)||1
+      };
+      state.sales.forEach((sale,index)=>{if(!sale.folio)sale.folio=String(state.sales.length-index).padStart(4,'0')});
+      state.saleSequence=Math.max(1,Number(state.saleSequence)||1,...state.sales.map(sale=>(Number(sale.folio)||0)+1));
+    }
+    function cacheCloudState(){
+      if(!cloud.storeId)return;
+      try{localStorage.setItem(CLOUD_CACHE_PREFIX+cloud.storeId,JSON.stringify({role:cloud.role,state}))}catch{}
+    }
+    function loadCloudCache(storeId){
+      try{const raw=localStorage.getItem(CLOUD_CACHE_PREFIX+storeId);return raw?JSON.parse(raw):null}catch{return null}
+    }
+    function clearCloudListeners(){
+      cloud.unsubs.forEach(fn=>{try{fn()}catch{}});
+      cloud.unsubs=[];
+    }
+    function translateAuthError(err){
+      const code=err?.code||'';
+      if(code==='auth/invalid-credential'||code==='auth/wrong-password'||code==='auth/user-not-found')return 'Correo o contraseña incorrectos.';
+      if(code==='auth/email-already-in-use')return 'Ya existe una cuenta con ese correo. Inicia sesión.';
+      if(code==='auth/weak-password')return 'La contraseña debe tener al menos 6 caracteres.';
+      if(code==='auth/invalid-email')return 'Escribe un correo electrónico válido.';
+      if(code==='auth/network-request-failed')return 'Sin conexión a internet. Revisa tu red e intenta de nuevo.';
+      if(code==='auth/too-many-requests')return 'Demasiados intentos seguidos. Espera un momento.';
+      return err?.message||'No se pudo completar la operación.';
+    }
+    async function ensureFirebase(){
+      if(cloud.sdkLoaded&&cloud.db&&cloud.auth)return true;
+      try{
+        const[appMod,authMod,fsMod]=await Promise.all([
+          import('https://www.gstatic.com/firebasejs/11.6.0/firebase-app.js'),
+          import('https://www.gstatic.com/firebasejs/11.6.0/firebase-auth.js'),
+          import('https://www.gstatic.com/firebasejs/11.6.0/firebase-firestore.js')
+        ]);
+        const app=appMod.getApps().length?appMod.getApp():appMod.initializeApp(FIREBASE_CONFIG);
+        let auth;
+        try{auth=authMod.initializeAuth(app,{persistence:[authMod.indexedDBLocalPersistence,authMod.browserLocalPersistence]})}
+        catch{auth=authMod.getAuth(app)}
+        let db;
+        try{db=fsMod.initializeFirestore(app,{localCache:fsMod.persistentLocalCache({tabManager:fsMod.persistentMultipleTabManager()})})}
+        catch{db=fsMod.getFirestore(app)}
+        cloud.fb={...appMod,...authMod,...fsMod};
+        cloud.app=app;cloud.auth=auth;cloud.db=db;cloud.sdkLoaded=true;cloud.sdkError='';
+        return true;
+      }catch(err){
+        cloud.sdkError=err?.message||'Sin conexión con Firebase';
+        return false;
+      }
+    }
+    function scheduleCloudRender(){
+      if(!modal){render();return}
+      if(modal.type==='sale'&&saleStep==='pick'){
+        const res=document.getElementById('sale-product-results');
+        if(res)res.innerHTML=renderSaleProducts();
+        updateTotal();
+      }
+    }
+    function buildProductDoc(record){
+      return {id:String(record.id),name:String(record.name||'Producto').slice(0,160),category:String(record.category||'Productos').slice(0,80),price:Math.max(0,Number(record.price)||0),stock:Math.max(0,Number(record.stock)||0),min:Math.max(0,Number(record.min)||0),emoji:String(record.emoji||'📦').slice(0,16),photo:resolvePortablePhoto(record),updatedAt:Date.now()};
+    }
+    function buildCatalogItemDoc(record){
+      return {id:String(record.id),name:String(record.name||'Producto').slice(0,160),category:String(record.category||'Productos').slice(0,80),price:Math.max(0,Number(record.price)||0),available:(Number(record.stock)||0)>0,emoji:String(record.emoji||'📦').slice(0,16),photo:resolvePortablePhoto(record),updatedAt:Date.now()};
+    }
+    function buildCatalogStoreDoc(storeId,settings){
+      return {storeId:String(storeId),business:String(settings.business||'Mi negocio').slice(0,120),phone:String(settings.phone||'').slice(0,40),currency:String(settings.currency||'MXN').slice(0,10),updatedAt:Date.now()};
+    }
+    async function subscribePublicCatalog(storeId){
+      clearCloudListeners();
+      cloud.publicStoreId=storeId;cloud.publicLoading=true;cloud.publicError='';
+      render();
+      if(!(await ensureFirebase())){
+        cloud.publicLoading=false;cloud.publicError='No se pudo conectar con el catálogo. Verifica tu internet.';render();return;
+      }
+      const{doc,collection,onSnapshot}=cloud.fb;
+      const u1=onSnapshot(doc(cloud.db,'catalog',storeId),snap=>{
+        cloud.publicStore=snap.exists()?snap.data():null;
+        cloud.publicLoading=false;
+        if(!snap.exists())cloud.publicError='No encontramos este catálogo. Verifica el enlace o código con el negocio.';
+        else cloud.publicError='';
+        render();
+      },()=>{cloud.publicLoading=false;cloud.publicError='No se pudo cargar el catálogo.';render()});
+      const u2=onSnapshot(collection(cloud.db,'catalog',storeId,'items'),snap=>{
+        cloud.publicItems=snap.docs.map(d=>d.data()).sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'es-MX'));
+        render();
+      },()=>{});
+      cloud.unsubs.push(u1,u2);
+    }
+    async function attachStoreCloud(storeId,roleOverride=null){
+      clearCloudListeners();
+      cloud.storeId=storeId;
+      if(roleOverride)cloud.role=roleOverride;
+      const cached=loadCloudCache(storeId);
+      if(cached?.state){applyLocalState(cached.state);if(!cloud.role&&cached.role)cloud.role=cached.role}
+      else{state={settings:{business:'Cargando negocio…',currency:'MXN',address:'',phone:'',email:'',registration:'',seller:''},products:[],customers:[],suppliers:[],sales:[],expenses:[],saleSequence:1}}
+      render();
+      const{doc,collection,query,where,onSnapshot}=cloud.fb;
+      const db=cloud.db,uid=cloud.user.uid;
+      let ownerStreamsAttached=false;
+      const attachOwnerStreams=()=>{
+        if(ownerStreamsAttached||cloud.role!=='owner')return;
+        ownerStreamsAttached=true;
+        const uCost=onSnapshot(collection(db,'stores',storeId,'productCosts'),snap=>{
+          const map={};snap.docs.forEach(d=>{map[d.id]=Number(d.data().cost)||0});
+          cloud.costsByProduct=map;
+          state.products=state.products.map(p=>({...p,cost:map[p.id]??p.cost??0}));
+          cacheCloudState();scheduleCloudRender();
+        },()=>{});
+        const uExp=onSnapshot(collection(db,'stores',storeId,'expenses'),snap=>{
+          state.expenses=snap.docs.map(d=>d.data()).sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
+          cacheCloudState();scheduleCloudRender();
+        },()=>{});
+        const uSup=onSnapshot(collection(db,'stores',storeId,'suppliers'),snap=>{
+          state.suppliers=snap.docs.map(d=>d.data()).sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'es-MX'));
+          cacheCloudState();scheduleCloudRender();
+        },()=>{});
+        const uInv=onSnapshot(query(collection(db,'invites'),where('storeId','==',storeId)),snap=>{
+          cloud.invites=snap.docs.map(d=>d.data()).sort((a,b)=>(Number(b.createdAt)||0)-(Number(a.createdAt)||0));
+          scheduleCloudRender();
+        },()=>{});
+        cloud.unsubs.push(uCost,uExp,uSup,uInv);
+      };
+      const uMemberSelf=onSnapshot(doc(db,'stores',storeId,'members',uid),snap=>{
+        if(!snap.exists()||snap.data().active!==true){
+          clearCloudListeners();
+          cloud.storeId=null;cloud.role=null;cloud.member=null;cloud.members=[];cloud.invites=[];cloud.costsByProduct={};
+          applyLocalState(loadState()||seed());
+          toast('Tu acceso a este negocio cambió o fue revocado',true);
+          modal={type:'onboarding'};render();return;
+        }
+        const m=snap.data();
+        const prevRole=cloud.role;
+        cloud.member=m;cloud.role=m.role;
+        if(m.role==='owner')attachOwnerStreams();
+        else if(prevRole==='owner'){attachStoreCloud(storeId,'seller');return}
+        if(m.role==='seller'&&['gastos','proveedores','reportes','equipo'].includes(page))page='inicio';
+        cacheCloudState();scheduleCloudRender();
+      },()=>{});
+      const uStore=onSnapshot(doc(db,'stores',storeId),snap=>{
+        if(!snap.exists())return;
+        const d=snap.data();
+        state.settings={business:d.business||'Mi negocio',currency:d.currency||'MXN',address:d.address||'',phone:d.phone||'',email:d.email||'',registration:d.registration||'',seller:d.seller||''};
+        state.saleSequence=Math.max(1,Number(d.saleSequence)||1,...state.sales.map(s=>(Number(s.folio)||0)+1));
+        cacheCloudState();scheduleCloudRender();
+      },()=>{});
+      const uProd=onSnapshot(collection(db,'stores',storeId,'products'),snap=>{
+        state.products=snap.docs.map(d=>{const x=d.data();return {...x,cost:cloud.role==='owner'?(cloud.costsByProduct[x.id]??0):0}}).sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'es-MX'));
+        cacheCloudState();scheduleCloudRender();
+      },()=>{});
+      const uCust=onSnapshot(collection(db,'stores',storeId,'customers'),snap=>{
+        state.customers=snap.docs.map(d=>d.data()).sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'es-MX'));
+        cacheCloudRender();scheduleCloudRender();
+      },()=>{});
+      const uSales=onSnapshot(collection(db,'stores',storeId,'sales'),snap=>{
+        state.sales=snap.docs.map(d=>d.data()).sort((a,b)=>String(b.date||'').localeCompare(String(a.date||''))||(Number(b.createdAt)||0)-(Number(a.createdAt)||0));
+        state.saleSequence=Math.max(Number(state.saleSequence)||1,...state.sales.map(s=>(Number(s.folio)||0)+1));
+        cacheCloudState();scheduleCloudRender();
+      },()=>{});
+      const uMembers=onSnapshot(collection(db,'stores',storeId,'members'),snap=>{
+        cloud.members=snap.docs.map(d=>d.data()).sort((a,b)=>(a.role==='owner'?-1:1)-(b.role==='owner'?-1:1)||String(a.name||a.email||'').localeCompare(String(b.name||b.email||''),'es-MX'));
+        scheduleCloudRender();
+      },()=>{});
+      cloud.unsubs.push(uMemberSelf,uStore,uProd,uCust,uSales,uMembers);
+      if(cloud.role==='owner')attachOwnerStreams();
+    }
+    async function loadUserProfileAndStore(user){
+      const{doc,getDoc,setDoc}=cloud.fb;
+      const db=cloud.db,uRef=doc(db,'users',user.uid);
+      let prof=null;
+      try{const snap=await getDoc(uRef);if(snap.exists())prof=snap.data()}catch{}
+      if(!prof){
+        prof={uid:user.uid,email:user.email||'',displayName:user.displayName||'',activeStoreId:null,storeIds:[],updatedAt:Date.now()};
+        try{await setDoc(uRef,prof)}catch{}
+      }
+      cloud.profile=prof;
+      const candidateIds=[prof.activeStoreId,...(Array.isArray(prof.storeIds)?prof.storeIds:[])].filter(Boolean);
+      for(const sid of [...new Set(candidateIds)]){
+        try{
+          const mSnap=await getDoc(doc(db,'stores',sid,'members',user.uid));
+          if(mSnap.exists()&&mSnap.data().active===true){
+            if(prof.activeStoreId!==sid){
+              prof.activeStoreId=sid;prof.updatedAt=Date.now();
+              await setDoc(uRef,prof,{merge:true}).catch(()=>{});
+            }
+            cloud.onboardingForced=false;
+            await attachStoreCloud(sid,mSnap.data().role);
+            return;
+          }
+        }catch{}
+      }
+      cloud.storeId=null;cloud.role=null;cloud.member=null;cloud.members=[];cloud.invites=[];
+      cloud.onboardingForced=true;
+      modal={type:'onboarding'};render();
+    }
+    async function initCloud(){
+      if(cloud.publicStoreId){await subscribePublicCatalog(cloud.publicStoreId);return}
+      if(!(await ensureFirebase())){cloud.authReady=true;render();return}
+      cloud.fb.onAuthStateChanged(cloud.auth,async user=>{
+        cloud.authReady=true;
+        if(!user){
+          clearCloudListeners();
+          const wasCloud=Boolean(cloud.user);
+          cloud.user=null;cloud.profile=null;cloud.storeId=null;cloud.role=null;cloud.member=null;cloud.members=[];cloud.invites=[];cloud.costsByProduct={};cloud.onboardingForced=false;
+          if(wasCloud){applyLocalState(loadState()||seed());page='inicio'}
+          render();return;
+        }
+        cloud.user={uid:user.uid,email:user.email||'',displayName:user.displayName||''};
+        await loadUserProfileAndStore(user);
+      });
+    }
+    async function createCloudStore({business,ownerName,migrateLocal}){
+      const{doc,writeBatch}=cloud.fb;
+      const db=cloud.db,uid=cloud.user.uid,now=Date.now();
+      const storeId='n'+uid.slice(0,6).toLowerCase()+Math.random().toString(36).slice(2,6);
+      const cleanName=(business||'Mi negocio').trim().slice(0,120)||'Mi negocio';
+      const myName=(ownerName||cloud.user.displayName||cloud.user.email||'Dueño').trim().slice(0,120);
+      const local=loadState()||state;
+      const seq=migrateLocal?Math.max(1,Number(local.saleSequence)||1,...(local.sales||[]).map(s=>(Number(s.folio)||0)+1)):1;
+      const storeSettings=migrateLocal?{...local.settings,business:cleanName}:{business:cleanName,currency:'MXN',address:'',phone:'',email:'',registration:'',seller:myName};
+      const existingIds=Array.isArray(cloud.profile?.storeIds)?cloud.profile.storeIds.filter(x=>x!==storeId):[];
+      const userDoc={uid,email:cloud.user.email||'',displayName:myName,activeStoreId:storeId,storeIds:[storeId,...existingIds].slice(0,20),updatedAt:now};
+      const storeDoc={id:storeId,business:cleanName,currency:String(storeSettings.currency||'MXN').slice(0,10),address:String(storeSettings.address||'').slice(0,250),phone:String(storeSettings.phone||'').slice(0,40),email:String(storeSettings.email||'').slice(0,254),registration:String(storeSettings.registration||'').slice(0,80),seller:String(storeSettings.seller||myName).slice(0,120),ownerUid:uid,saleSequence:seq,createdAt:now,updatedAt:now};
+      const memberDoc={uid,email:cloud.user.email||'',name:myName,role:'owner',active:true,joinedAt:now,updatedAt:now};
+      const b1=writeBatch(db);
+      b1.set(doc(db,'stores',storeId),storeDoc);
+      b1.set(doc(db,'stores',storeId,'members',uid),memberDoc);
+      b1.set(doc(db,'users',uid),userDoc);
+      b1.set(doc(db,'catalog',storeId),buildCatalogStoreDoc(storeId,storeDoc));
+      await b1.commit();
+      if(migrateLocal){
+        const ops=[];
+        for(const p of (local.products||[])){
+          const pd={...buildProductDoc(p),createdAt:now};
+          ops.push([doc(db,'stores',storeId,'products',pd.id),pd]);
+          ops.push([doc(db,'stores',storeId,'productCosts',pd.id),{id:pd.id,productId:pd.id,cost:Math.max(0,Number(p.cost)||0),createdAt:now,updatedAt:now}]);
+          ops.push([doc(db,'catalog',storeId,'items',pd.id),buildCatalogItemDoc(p)]);
+        }
+        for(const e of (local.expenses||[])){
+          const id=String(e.id||uid());
+          ops.push([doc(db,'stores',storeId,'expenses',id),{id,date:String(e.date||today()),name:String(e.name||'Gasto').slice(0,160),category:String(e.category||'Otros').slice(0,80),amount:Math.max(0,Number(e.amount)||0),payment:String(e.payment||'Efectivo').slice(0,60),notes:String(e.notes||'').slice(0,1000),createdAt:now,updatedAt:now}]);
+        }
+        for(const c of (local.customers||[])){
+          const id=String(c.id||uid());
+          ops.push([doc(db,'stores',storeId,'customers',id),{id,name:String(c.name||'Cliente').slice(0,160),phone:String(c.phone||'').slice(0,40),email:String(c.email||'').slice(0,254),notes:String(c.notes||'').slice(0,1000),createdAt:now,updatedAt:now}]);
+        }
+        for(const s of (local.suppliers||[])){
+          const id=String(s.id||uid());
+          ops.push([doc(db,'stores',storeId,'suppliers',id),{id,name:String(s.name||'Proveedor').slice(0,160),phone:String(s.phone||'').slice(0,40),email:String(s.email||'').slice(0,254),notes:String(s.notes||'').slice(0,1000),createdAt:now,updatedAt:now}]);
+        }
+        for(const v of (local.sales||[])){
+          const id=String(v.id||uid()),tot=Math.max(0,Number(v.total)||0),pd=Math.min(tot,Math.max(0,Number(v.paid)||0));
+          ops.push([doc(db,'stores',storeId,'sales',id),{id,folio:String(v.folio||'0001').slice(0,32),date:String(v.date||today()),time:String(v.time||'').slice(0,32),seller:String(v.seller||myName).slice(0,120),sellerUid:uid,items:Array.isArray(v.items)?v.items.slice(0,200):[],product:String(v.product||'').slice(0,200),productId:String(v.productId||'').slice(0,128),qty:Math.max(0,Number(v.qty)||0),unitPrice:Math.max(0,Number(v.unitPrice)||0),total:tot,customer:String(v.customer||'').slice(0,160),payment:String(v.payment||'Efectivo').slice(0,60),paid:pd,createdAt:now,updatedAt:now}]);
+        }
+        for(let i=0;i<ops.length;i+=400){
+          const bx=writeBatch(db);
+          ops.slice(i,i+400).forEach(([ref,data])=>bx.set(ref,data));
+          await bx.commit();
+        }
+      }
+      cloud.profile=userDoc;cloud.onboardingForced=false;
+      await attachStoreCloud(storeId,'owner');
+    }
+    async function joinCloudWithInvite({code,memberName}){
+      const cleanCode=String(code||'').trim().toUpperCase();
+      if(cleanCode.length<4)throw new Error('Escribe un código de invitación válido.');
+      const{doc,getDoc,writeBatch}=cloud.fb;
+      const db=cloud.db,uid=cloud.user.uid,now=Date.now();
+      const invRef=doc(db,'invites',cleanCode);
+      const invSnap=await getDoc(invRef);
+      if(!invSnap.exists())throw new Error('Ese código de invitación no existe.');
+      const inv=invSnap.data();
+      if(!inv.active||inv.usedBy)throw new Error('Ese código ya fue usado o fue revocado.');
+      const myName=(memberName||cloud.user.displayName||cloud.user.email||'Miembro').trim().slice(0,120);
+      const storeId=inv.storeId;
+      const existingIds=Array.isArray(cloud.profile?.storeIds)?cloud.profile.storeIds.filter(x=>x!==storeId):[];
+      const userDoc={uid,email:cloud.user.email||'',displayName:myName,activeStoreId:storeId,storeIds:[storeId,...existingIds].slice(0,20),updatedAt:now};
+      const batch=writeBatch(db);
+      batch.update(invRef,{active:false,usedBy:uid,usedAt:now});
+      batch.set(doc(db,'stores',storeId,'members',uid),{uid,email:cloud.user.email||'',name:myName,role:inv.role,active:true,joinedAt:now,inviteCode:cleanCode,updatedAt:now});
+      batch.set(doc(db,'users',uid),userDoc,{merge:true});
+      await batch.commit();
+      cloud.profile=userDoc;cloud.onboardingForced=false;
+      await attachStoreCloud(storeId,inv.role);
+    }
+    async function createInviteCode(role){
+      if(!isOwnerRole()||!cloud.storeId)return;
+      const{doc,setDoc}=cloud.fb;
+      const chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      let code='NT';
+      for(let i=0;i<6;i++)code+=chars[Math.floor(Math.random()*chars.length)];
+      const now=Date.now();
+      await setDoc(doc(cloud.db,'invites',code),{code,storeId:cloud.storeId,storeName:String(state.settings.business||'Mi negocio').slice(0,120),role:role==='owner'?'owner':'seller',active:true,usedBy:null,usedAt:null,createdBy:cloud.user.uid,createdAt:now});
+      toast(`Código ${code} creado`);
+    }
+    async function revokeInviteCode(code){
+      if(!isOwnerRole()||!cloud.storeId)return;
+      const{doc,deleteDoc}=cloud.fb;
+      await deleteDoc(doc(cloud.db,'invites',code));
+      toast('Invitación eliminada');
+    }
+    async function setMemberRole(memberUid,newRole){
+      if(!isOwnerRole()||!cloud.storeId)return;
+      const m=cloud.members.find(x=>x.uid===memberUid);if(!m)return;
+      if(memberUid===cloud.user.uid&&newRole!=='owner'){
+        const otherOwners=cloud.members.filter(x=>x.uid!==memberUid&&x.role==='owner'&&x.active);
+        if(!otherOwners.length)return toast('Debe quedar al menos un dueño en la tienda',true);
+      }
+      const{doc,updateDoc}=cloud.fb;
+      await updateDoc(doc(cloud.db,'stores',cloud.storeId,'members',memberUid),{role:newRole,updatedAt:Date.now()});
+      toast(`Rol actualizado a ${newRole==='owner'?'Dueño':'Vendedor'}`);
+    }
+    async function removeMember(memberUid){
+      if(!isOwnerRole()||!cloud.storeId||memberUid===cloud.user.uid)return;
+      if(!confirm('¿Quitar acceso a esta persona del negocio?'))return;
+      const{doc,deleteDoc}=cloud.fb;
+      await deleteDoc(doc(cloud.db,'stores',cloud.storeId,'members',memberUid));
+      toast('Miembro eliminado del equipo');
+    }
+    async function cloudSaveProduct(record,isNew){
+      const{doc,writeBatch}=cloud.fb;
+      const db=cloud.db,sid=cloud.storeId,now=Date.now();
+      const b=writeBatch(db);
+      const prodDoc={...buildProductDoc(record),...(isNew?{createdAt:now}:{})};
+      const costDoc={id:String(record.id),productId:String(record.id),cost:Math.max(0,Number(record.cost)||0),...(isNew?{createdAt:now}:{}),updatedAt:now};
+      b.set(doc(db,'stores',sid,'products',prodDoc.id),prodDoc,{merge:true});
+      b.set(doc(db,'stores',sid,'productCosts',prodDoc.id),costDoc,{merge:true});
+      b.set(doc(db,'catalog',sid,'items',prodDoc.id),buildCatalogItemDoc(record),{merge:true});
+      await b.commit();
+    }
+    async function cloudAdjustStock(product,nextStock){
+      const{doc,updateDoc}=cloud.fb;
+      const db=cloud.db,sid=cloud.storeId,now=Date.now();
+      await updateDoc(doc(db,'stores',sid,'products',product.id),{stock:nextStock,updatedAt:now});
+      try{await updateDoc(doc(db,'catalog',sid,'items',product.id),{available:nextStock>0,updatedAt:now})}catch{}
+    }
+    async function cloudSaveSale(sale,stockChanges,isEdit,nextSeq){
+      const{doc,writeBatch,updateDoc}=cloud.fb;
+      const db=cloud.db,sid=cloud.storeId,now=Date.now();
+      const tot=Math.max(0,Number(sale.total)||0),pd=Math.min(tot,Math.max(0,Number(sale.paid)||0));
+      const saleDoc={id:String(sale.id),folio:String(sale.folio||'0001').slice(0,32),date:String(sale.date||today()),time:String(sale.time||'').slice(0,32),seller:String(sale.seller||'').slice(0,120),sellerUid:String(sale.sellerUid||cloud.user.uid),items:Array.isArray(sale.items)?sale.items.slice(0,200):[],product:String(sale.product||'').slice(0,200),productId:String(sale.productId||'').slice(0,128),qty:Math.max(0,Number(sale.qty)||0),unitPrice:Math.max(0,Number(sale.unitPrice)||0),total:tot,customer:String(sale.customer||'').slice(0,160),payment:String(sale.payment||'Efectivo').slice(0,60),paid:pd,...(isEdit?{}:{createdAt:now}),updatedAt:now};
+      const b=writeBatch(db);
+      b.set(doc(db,'stores',sid,'sales',saleDoc.id),saleDoc,{merge:true});
+      stockChanges.forEach(({id,stock})=>{
+        b.update(doc(db,'stores',sid,'products',id),{stock:Math.max(0,Number(stock)||0),updatedAt:now});
+      });
+      if(!isEdit)b.update(doc(db,'stores',sid),{saleSequence:Math.max(1,Math.floor(Number(nextSeq)||1)),updatedAt:now});
+      await b.commit();
+      for(const sc of stockChanges){
+        try{await updateDoc(doc(db,'catalog',sid,'items',sc.id),{available:sc.stock>0,updatedAt:now})}catch{}
+      }
+    }
+    async function cloudCollectSale(s){
+      const{doc,updateDoc}=cloud.fb;
+      const paid=Math.min(Number(s.total)||0,Math.max(0,Number(s.paid)||0));
+      await updateDoc(doc(cloud.db,'stores',cloud.storeId,'sales',s.id),{paid,payment:String(s.payment||'Efectivo').slice(0,60),updatedAt:Date.now()});
+    }
+    async function cloudSaveExpense(record,isNew){
+      const{doc,setDoc}=cloud.fb;
+      const now=Date.now();
+      await setDoc(doc(cloud.db,'stores',cloud.storeId,'expenses',record.id),{id:record.id,date:record.date,name:record.name.slice(0,160),category:String(record.category||'Otros').slice(0,80),amount:Math.max(0,Number(record.amount)||0),payment:String(record.payment||'Efectivo').slice(0,60),notes:String(record.notes||'').slice(0,1000),...(isNew?{createdAt:now}:{}),updatedAt:now},{merge:true});
+    }
+    async function cloudSaveContact(kind,record,isNew){
+      const{doc,setDoc}=cloud.fb;
+      const col=kind==='customer'?'customers':'suppliers',now=Date.now();
+      await setDoc(doc(cloud.db,'stores',cloud.storeId,col,record.id),{id:record.id,name:record.name.slice(0,160),phone:String(record.phone||'').slice(0,40),email:String(record.email||'').slice(0,254),notes:String(record.notes||'').slice(0,1000),...(isNew?{createdAt:now}:{}),updatedAt:now},{merge:true});
+    }
+    async function cloudDeleteRecord(type,id,stockRestores=[]){
+      const{doc,writeBatch,deleteDoc,updateDoc}=cloud.fb;
+      const db=cloud.db,sid=cloud.storeId,now=Date.now();
+      if(type==='product'){
+        const b=writeBatch(db);
+        b.delete(doc(db,'stores',sid,'products',id));
+        b.delete(doc(db,'stores',sid,'productCosts',id));
+        b.delete(doc(db,'catalog',sid,'items',id));
+        await b.commit();return;
+      }
+      if(type==='sale'){
+        const b=writeBatch(db);
+        b.delete(doc(db,'stores',sid,'sales',id));
+        stockRestores.forEach(({id:pid,stock})=>b.update(doc(db,'stores',sid,'products',pid),{stock:Math.max(0,Number(stock)||0),updatedAt:now}));
+        await b.commit();
+        for(const sc of stockRestores){try{await updateDoc(doc(db,'catalog',sid,'items',sc.id),{available:sc.stock>0,updatedAt:now})}catch{}}
+        return;
+      }
+      const map={expense:'expenses',customer:'customers',supplier:'suppliers'};
+      if(map[type])await deleteDoc(doc(db,'stores',sid,map[type],id));
+    }
+    async function cloudSaveSettings(){
+      if(!isOwnerRole()||!cloud.storeId)return;
+      const{doc,writeBatch}=cloud.fb;
+      const db=cloud.db,sid=cloud.storeId,now=Date.now(),st=state.settings;
+      const b=writeBatch(db);
+      b.update(doc(db,'stores',sid),{business:String(st.business||'Mi negocio').slice(0,120),currency:String(st.currency||'MXN').slice(0,10),address:String(st.address||'').slice(0,250),phone:String(st.phone||'').slice(0,40),email:String(st.email||'').slice(0,254),registration:String(st.registration||'').slice(0,80),seller:String(st.seller||'').slice(0,120),updatedAt:now});
+      b.set(doc(db,'catalog',sid),buildCatalogStoreDoc(sid,st),{merge:true});
+      await b.commit();
+    }
     function saveModalDraft(){
       if(modal?.type!=='product')return;
       const val=(id,fb)=>{const el=document.getElementById(id);return el?el.value:fb};
@@ -67,18 +506,19 @@
     const UPDATE_MANIFEST_URL='https://navi1896.github.io/notas-app/version.json';
     const compareSemver=(a='0',b='0')=>{const pa=String(a).split('.').map(Number),pb=String(b).split('.').map(Number);for(let i=0;i<3;i++){const da=pa[i]||0,db=pb[i]||0;if(da!==db)return da-db}return 0};
     const app=document.getElementById('app');
-    const navItems=[['inicio','Inicio','home'],['ventas','Ventas','cart'],['gastos','Gastos','receipt'],['inventario','Inventario','box'],['clientes','Clientes','users'],['proveedores','Proveedores','truck'],['deudas','Pendientes','clock'],['reportes','Reportes','chart'],['catalogo','Catálogo','grid']];
-    const path={home:'<path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',cart:'<circle cx="9" cy="21" r="1"/><circle cx="19" cy="21" r="1"/><path d="M2 3h2l2.4 12.1a2 2 0 0 0 2 1.6h9.8a2 2 0 0 0 2-1.6L22 7H5"/>',receipt:'<path d="M4 3h16v18l-3-2-3 2-3-2-3 2-4-2z"/><path d="M8 8h8M8 12h8M8 16h4"/>',box:'<path d="m12 3 9 5-9 5-9-5z"/><path d="M3 8v9l9 5 9-5V8M12 13v9"/>',users:'<path d="M16 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="10" cy="7" r="4"/><path d="M20 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',truck:'<path d="M3 6h11v12H3zM14 10h4l3 3v5h-7z"/><circle cx="7.5" cy="19" r="1.5"/><circle cx="17.5" cy="19" r="1.5"/>',clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',chart:'<path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-5 5"/>',grid:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>',settings:'<circle cx="12" cy="12" r="3"/><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.7-.6a8 8 0 0 1-1.7 1l-.3 1.8h-2.8l-.4-1.8a8 8 0 0 1-1.7-1l-1.7.6-1.4-2.4 1.4-1.1a8 8 0 0 1 0-2L6.4 12l1.4-2.4 1.7.6a8 8 0 0 1 1.7-1l.4-1.8h2.8l.3 1.8a8 8 0 0 1 1.7 1l1.7-.6 1.4 2.4-1.4 1.1a8 8 0 0 1-.1 1.9z"/>',plus:'<path d="M12 5v14M5 12h14"/>',search:'<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',bell:'<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/>',export:'<path d="M12 3v12M7 8l5-5 5 5"/><path d="M5 14v6h14v-6"/>',edit:'<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/>',trash:'<path d="M3 6h18M8 6V4h8v2m3 0-1 15H6L5 6m4 4v7m6-7v7"/>',menu:'<path d="M4 6h16M4 12h16M4 18h16"/>',chevron:'<path d="m9 18 6-6-6-6"/>',camera:'<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>',image:'<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>'};
+    const navItems=[['inicio','Inicio','home'],['ventas','Ventas','cart'],['gastos','Gastos','receipt'],['inventario','Inventario','box'],['clientes','Clientes','users'],['proveedores','Proveedores','truck'],['deudas','Pendientes','clock'],['reportes','Reportes','chart'],['catalogo','Catálogo','grid'],['equipo','Equipo','team']];
+    const path={home:'<path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',cart:'<circle cx="9" cy="21" r="1"/><circle cx="19" cy="21" r="1"/><path d="M2 3h2l2.4 12.1a2 2 0 0 0 2 1.6h9.8a2 2 0 0 0 2-1.6L22 7H5"/>',receipt:'<path d="M4 3h16v18l-3-2-3 2-3-2-3 2-4-2z"/><path d="M8 8h8M8 12h8M8 16h4"/>',box:'<path d="m12 3 9 5-9 5-9-5z"/><path d="M3 8v9l9 5 9-5V8M12 13v9"/>',users:'<path d="M16 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="10" cy="7" r="4"/><path d="M20 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',truck:'<path d="M3 6h11v12H3zM14 10h4l3 3v5h-7z"/><circle cx="7.5" cy="19" r="1.5"/><circle cx="17.5" cy="19" r="1.5"/>',clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',chart:'<path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-5 5"/>',grid:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>',team:'<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',cloud:'<path d="M17.5 19H7a5 5 0 0 1-.5-9.97A6 6 0 0 1 18 10a4.5 4.5 0 0 1-.5 9z"/>',settings:'<circle cx="12" cy="12" r="3"/><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.7-.6a8 8 0 0 1-1.7 1l-.3 1.8h-2.8l-.4-1.8a8 8 0 0 1-1.7-1l-1.7.6-1.4-2.4 1.4-1.1a8 8 0 0 1 0-2L6.4 12l1.4-2.4 1.7.6a8 8 0 0 1 1.7-1l.4-1.8h2.8l.3 1.8a8 8 0 0 1 1.7 1l1.7-.6 1.4 2.4-1.4 1.1a8 8 0 0 1-.1 1.9z"/>',plus:'<path d="M12 5v14M5 12h14"/>',search:'<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',bell:'<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/>',export:'<path d="M12 3v12M7 8l5-5 5 5"/><path d="M5 14v6h14v-6"/>',edit:'<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/>',trash:'<path d="M3 6h18M8 6V4h8v2m3 0-1 15H6L5 6m4 4v7m6-7v7"/>',menu:'<path d="M4 6h16M4 12h16M4 18h16"/>',chevron:'<path d="m9 18 6-6-6-6"/>',camera:'<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>',image:'<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>'};
     const icon=(name,size=18)=>`<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path[name]||path.grid}</svg>`;
-    const money=(n)=>new Intl.NumberFormat('es-MX',{style:'currency',currency:state.settings.currency||'MXN',minimumFractionDigits:0,maximumFractionDigits:2}).format(Number(n)||0);
+    const money=(n)=>new Intl.NumberFormat('es-MX',{style:'currency',currency:(cloud.publicStoreId?cloud.publicStore?.currency:state.settings.currency)||'MXN',minimumFractionDigits:0,maximumFractionDigits:2}).format(Number(n)||0);
     const fmtDate=(s)=>{if(!s)return'—';const d=new Date(s+'T12:00:00');return new Intl.DateTimeFormat('es-MX',{day:'numeric',month:'short'}).format(d)};
     const esc=(s)=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-    const save=()=>{const value=JSON.stringify(state);try{localStorage.setItem(STORE_KEY,value)}catch{}try{window.NotasApp?.saveState?.(value)}catch{}};
+    const save=()=>{if(isCloudActive()){cacheCloudState();return}const value=JSON.stringify(state);try{localStorage.setItem(STORE_KEY,value)}catch{}try{window.NotasApp?.saveState?.(value)}catch{}};
     const getProduct=(id)=>state.products.find(p=>p.id===id);
     const productArt=(p)=>p?.photo?`<img src="${esc(p.photo)}" alt="" onerror="this.replaceWith(document.createTextNode('📦'))" />`:esc(p?.emoji||'📦');
     const pending=(s)=>Math.max(0,(Number(s.total)||0)-(Number(s.paid)||0));
     const getSaleItems=(s)=>Array.isArray(s.items)&&s.items.length?s.items.map(item=>({productId:item.productId,product:item.product||item.name||'Producto',name:item.name||item.product||'Producto',qty:Number(item.qty)||0,unitPrice:Number(item.unitPrice)||0,total:Number(item.total??item.amount)||((Number(item.qty)||0)*(Number(item.unitPrice)||0))})):[{productId:s.productId,product:s.product||'Producto',name:s.product||'Producto',qty:Number(s.qty)||0,unitPrice:Number(s.unitPrice)||0,total:Number(s.total)||0}];
     const invoiceDate=(s)=>{const d=new Date((s.date||today())+'T12:00:00');const date=new Intl.DateTimeFormat('es-MX',{day:'2-digit',month:'long',year:'numeric'}).format(d);return `${date}${s.time?' · '+s.time:''}`};
+    const visibleNavItems=()=>isSellerRole()?navItems.filter(x=>['inicio','ventas','inventario','clientes','deudas','catalogo'].includes(x[0])):navItems;
     const iconForNav=(id)=>navItems.find(x=>x[0]===id)?.[2]||'grid';
     function navButton(id,label,ic){return `<button class="nav-btn ${page===id?'active':''}" data-page="${id}"><span class="nav-icon">${icon(ic)}</span><span>${label}</span>${id==='deudas'&&state.sales.filter(s=>pending(s)>0).length?`<span class="nav-count">${state.sales.filter(s=>pending(s)>0).length}</span>`:''}</button>`}
     const totalSales=(arr=state.sales)=>arr.reduce((a,s)=>a+Number(s.total||0),0);
@@ -87,19 +527,52 @@
     function dataInPeriod(){return{sales:state.sales.filter(s=>withinDays(s.date,period==='all'?100000:Number(period))),expenses:state.expenses.filter(e=>withinDays(e.date,period==='all'?100000:Number(period)))}}
     function head(title,desc,actions=''){return `<div class="page-head"><div><div class="eyebrow">Notas · ${esc(state.settings.business||'Mi negocio')}</div><h1 class="page-title">${title}</h1><p class="page-desc">${desc}</p></div>${actions?`<div class="head-actions">${actions}</div>`:''}</div>`}
     function pageTitle(){return navItems.find(x=>x[0]===page)?.[1]||'Inicio'}
+    function renderPublicCatalog(){
+      const st=cloud.publicStore||{business:'Catálogo',currency:'MXN',phone:''};
+      const avail=cloud.publicItems.filter(p=>p.available!==false);
+      const cats=['Todas',...new Set(avail.map(p=>p.category||'Productos'))].sort((a,b)=>a==='Todas'?-1:b==='Todas'?1:a.localeCompare(b,'es-MX'));
+      const q=search.trim().toLocaleLowerCase('es-MX');
+      const list=avail.filter(p=>(cloud.publicCategory==='Todas'||(p.category||'Productos')===cloud.publicCategory)&&(!q||(p.name+' '+(p.category||'')).toLocaleLowerCase('es-MX').includes(q)));
+      const cartEntries=Object.entries(cloud.publicCart).filter(([,q])=>q>0).map(([id,qty])=>{const p=avail.find(x=>x.id===id);return p?{...p,qty}:null}).filter(Boolean);
+      const cartUnits=cartEntries.reduce((a,x)=>a+x.qty,0),cartTotal=cartEntries.reduce((a,x)=>a+x.qty*(Number(x.price)||0),0);
+      app.innerHTML=`<div class="pub-shell"><header class="pub-header"><div class="pub-brand"><div class="brand-mark">N.</div><div><div class="pub-title">${esc(st.business||'Catálogo')}</div><div class="pub-sub">Catálogo en vivo · Productos disponibles</div></div></div><div class="pub-head-actions">${!cloud.publicViaLink?`<button class="btn btn-light btn-sm" data-pub-exit>Volver a Notas</button>`:`<button class="btn btn-light btn-sm" data-pub-exit>Soy del equipo</button>`}</div></header><main class="pub-content">${cloud.publicLoading?`<div class="card empty">Cargando catálogo disponible…</div>`:cloud.publicError?`<div class="card empty"><div class="empty-icon">🔎</div>${esc(cloud.publicError)}</div>`:`${toolbar('Buscar producto en el catálogo…')}${cats.length>2?`<div class="sale-categories" role="tablist">${cats.map(c=>`<button type="button" class="sale-chip ${cloud.publicCategory===c?'active':''}" data-pub-cat="${esc(c)}">${esc(c)}</button>`).join('')}</div>`:''}${list.length?`<div class="grid pub-grid">${list.map(p=>{const qty=cloud.publicCart[p.id]||0;return `<article class="card pub-card ${qty>0?'selected':''}"><button type="button" class="pub-art photo-zoom-trigger" data-pub-zoom="${esc(p.id)}" aria-label="Ampliar ${esc(p.name)}">${productArt(p)}</button><div class="pub-body"><div class="pub-name">${esc(p.name)}</div><div class="pub-meta"><span>${esc(p.category||'Producto')}</span><span class="badge green">Disponible</span></div><div class="pub-foot"><strong class="pub-price">${money(p.price)}</strong><div class="qty-stepper"><button type="button" data-pub-qty="-1" data-id="${esc(p.id)}" ${qty<1?'disabled':''}>−</button><strong>${qty}</strong><button type="button" data-pub-qty="1" data-id="${esc(p.id)}">+</button></div></div></div></article>`}).join('')}</div>`:`<div class="card empty">No hay productos disponibles con esa búsqueda.</div>`}`}</main>${cartUnits?`<div class="pub-cart-bar"><div class="pub-cart-info"><span>${cartUnits} producto(s) seleccionados</span><strong>${money(cartTotal)}</strong></div><button type="button" class="btn btn-lime" data-pub-whatsapp>${st.phone?'Pedir por WhatsApp':'Copiar lista de pedido'}</button></div>`:''}</div>`;
+      const searchInput=document.getElementById('list-search');
+      if(searchInput)searchInput.addEventListener('input',e=>{const pos=e.target.selectionStart;search=e.target.value;render();const f=document.getElementById('list-search');f?.focus();f?.setSelectionRange(pos,pos)});
+      document.querySelectorAll('[data-pub-cat]').forEach(b=>b.addEventListener('click',()=>{cloud.publicCategory=b.dataset.pubCat;render()}));
+      document.querySelectorAll('[data-pub-qty]').forEach(b=>b.addEventListener('click',()=>{const id=b.dataset.id,next=Math.max(0,(cloud.publicCart[id]||0)+Number(b.dataset.pubQty));if(next)cloud.publicCart[id]=next;else delete cloud.publicCart[id];render()}));
+      document.querySelectorAll('[data-pub-zoom]').forEach(b=>b.addEventListener('click',()=>{const p=cloud.publicItems.find(x=>x.id===b.dataset.pubZoom);if(p)openPhotoZoom({photo:p.photo,emoji:p.emoji,title:p.name,subtitle:p.category||'Disponible',priceText:money(p.price)})}));
+      document.querySelector('[data-pub-exit]')?.addEventListener('click',()=>{clearCloudListeners();cloud.publicStoreId='';cloud.publicViaLink=false;cloud.publicCart={};search='';if(location.search.includes('catalogo')||location.hash.includes('catalogo')){try{history.replaceState(null,'',location.pathname)}catch{}}initCloud();render()});
+      document.querySelector('[data-pub-whatsapp]')?.addEventListener('click',()=>{
+        const lines=[`Hola, me gustaría pedir de *${st.business||'tu tienda'}*:`,...cartEntries.map(x=>`• ${x.qty}x ${x.name} (${money(x.qty*(Number(x.price)||0))})`),`Total aproximado: ${money(cartTotal)}`].join('\n');
+        const digits=String(st.phone||'').replace(/\D/g,'');
+        if(digits.length>=8){const wa=(digits.length===10?'52'+digits:digits);window.open(`https://wa.me/${wa}?text=${encodeURIComponent(lines)}`,'_blank','noopener');return}
+        if(navigator.clipboard?.writeText){navigator.clipboard.writeText(lines).then(()=>toast('Pedido copiado para enviar')).catch(()=>toast('No se pudo copiar el pedido',true))}
+        else toast(lines);
+      });
+    }
     function render(){
-      const mobile=[['inicio','Inicio','home'],['ventas','Ventas','cart'],['inventario','Stock','box'],['reportes','Reportes','chart'],['mas','Menú','menu']];
+      if(cloud.publicStoreId){renderPublicCatalog();return}
+      const navList=visibleNavItems();
+      const mobile=isSellerRole()
+        ?[['inicio','Inicio','home'],['ventas','Ventas','cart'],['inventario','Stock','box'],['catalogo','Catálogo','grid'],['mas','Menú','menu']]
+        :[['inicio','Inicio','home'],['ventas','Ventas','cart'],['inventario','Stock','box'],['reportes','Reportes','chart'],['mas','Menú','menu']];
       const updateBanner=updateInfo?`<div class="update-banner"><div><strong>Nueva versión disponible (v${esc(updateInfo.webVersion||updateInfo.versionName)})</strong><span>${esc(updateInfo.notes||'Mejoras listas para instalar.')}</span></div><button class="btn btn-primary btn-sm" data-action="apply-update">Actualizar ahora</button></div>`:'';
-      app.innerHTML=`<div class="shell"><aside class="sidebar"><div class="brand"><div class="brand-mark">N.</div><div><div class="brand-name">notas</div><div class="brand-sub">cuentas claras, negocio en orden</div></div></div><div class="nav-label">Tu negocio</div><nav class="nav">${navItems.map(x=>navButton(x[0],x[1],x[2])).join('')}</nav><div class="sidebar-bottom"><button class="nav-btn" data-action="settings"><span class="nav-icon">${icon('settings')}</span><span>Configuración</span></button><div class="shop-card"><div class="shop-avatar">⌂</div><div class="shop-copy"><div class="shop-name">${esc(state.settings.business||'Mi negocio')}</div><div class="shop-plan">Espacio local · ${esc(state.settings.currency||'MXN')}</div></div><button class="shop-menu" data-action="settings" aria-label="Configuración">···</button></div></div></aside><main class="main"><header class="topbar"><div class="crumb">${page==='inicio'?'Resumen de hoy':pageTitle()}</div><div class="top-actions"><button class="icon-btn" data-action="settings" title="Configuración">${icon('settings',17)}</button><div class="user-pill" aria-label="Perfil">${esc((state.settings.business||'N').slice(0,1).toUpperCase())}</div></div></header><div class="content">${updateBanner}${renderPage()}</div></main></div><nav class="mobile-nav">${mobile.map(([id,label,ic])=>`<button data-page="${id}" class="${page===id?'active':''}"><span class="nav-icon">${icon(ic)}</span><span>${label}</span></button>`).join('')}</nav>${modal?renderModal():''}`;
+      const cloudBanner=!cloud.user&&cloud.authReady?`<div class="cloud-banner"><div><strong>Sincroniza tus celulares y vendedores en la nube</strong><span>Inicia sesión para compartir catálogo en vivo entre dispositivos y generar tu link para compradores.</span></div><button class="btn btn-primary btn-sm" data-action="auth">Conectar cuenta</button></div>`:'';
+      const planLabel=isCloudActive()?`${cloudRoleLabel()} · Nube`:cloud.user?'Cuenta lista · Sin negocio':`Espacio local · ${esc(state.settings.currency||'MXN')}`;
+      const avatarChar=esc((cloud.user?.displayName||cloud.user?.email||state.settings.business||'N').slice(0,1).toUpperCase());
+      app.innerHTML=`<div class="shell"><aside class="sidebar"><div class="brand"><div class="brand-mark">N.</div><div><div class="brand-name">notas</div><div class="brand-sub">cuentas claras, negocio en orden</div></div></div><div class="nav-label">Tu negocio</div><nav class="nav">${navList.map(x=>navButton(x[0],x[1],x[2])).join('')}</nav><div class="sidebar-bottom">${isOwnerRole()?`<button class="nav-btn" data-action="settings"><span class="nav-icon">${icon('settings')}</span><span>Configuración</span></button>`:''}<button class="shop-card shop-card-btn" data-action="${cloud.user?'account':'auth'}"><div class="shop-avatar">${isCloudActive()?'☁️':'⌂'}</div><div class="shop-copy"><div class="shop-name">${esc(state.settings.business||'Mi negocio')}</div><div class="shop-plan">${esc(planLabel)}</div></div><span class="shop-menu">${cloud.user?'✓':'→'}</span></button></div></aside><main class="main"><header class="topbar"><div class="crumb">${page==='inicio'?'Resumen de hoy':pageTitle()}${isCloudActive()?` <span class="role-pill ${cloud.role}">${esc(cloudRoleLabel())}</span>`:''}</div><div class="top-actions">${isOwnerRole()?`<button class="icon-btn" data-action="settings" title="Configuración">${icon('settings',17)}</button>`:''}<button type="button" class="user-pill" data-action="${cloud.user?'account':'auth'}" title="${cloud.user?'Cuenta en la nube':'Iniciar sesión'}" aria-label="Cuenta">${avatarChar}</button></div></header><div class="content">${updateBanner}${cloudBanner}${renderPage()}</div></main></div><nav class="mobile-nav">${mobile.map(([id,label,ic])=>`<button data-page="${id}" class="${page===id?'active':''}"><span class="nav-icon">${icon(ic)}</span><span>${label}</span></button>`).join('')}</nav>${modal?renderModal():''}`;
       document.querySelectorAll('.table-wrap table').forEach(table=>{const labels=[...table.querySelectorAll('thead th')].map(th=>th.textContent.trim());table.querySelectorAll('tbody tr').forEach(row=>[...row.cells].forEach((cell,i)=>{cell.dataset.label=labels[i]||'';if(cell.querySelector('.inline-actions'))cell.classList.add('mobile-actions')}))});
-      document.querySelectorAll('[data-page]').forEach(b=>b.addEventListener('click',()=>{if(b.dataset.page==='mas'){showMoreMenu();return}page=b.dataset.page;search='';saleFilter='all';stockFilter='all';invCategory='Todas';render()}));
+      document.querySelectorAll('[data-page]').forEach(b=>b.addEventListener('click',()=>{if(b.dataset.page==='mas'){showMoreMenu();return}if(isSellerRole()&&['gastos','proveedores','reportes','equipo'].includes(b.dataset.page))return toast('Solo un dueño puede abrir esa sección',true);page=b.dataset.page;search='';saleFilter='all';stockFilter='all';invCategory='Todas';render()}));
       document.querySelectorAll('[data-open]').forEach(b=>b.addEventListener('click',()=>openModal(b.dataset.open)));
       document.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click',()=>openModal(b.dataset.edit,b.dataset.id)));
       document.querySelectorAll('[data-delete]').forEach(b=>b.addEventListener('click',()=>deleteRecord(b.dataset.delete,b.dataset.id)));
-      bindPage(); if(page==='reportes')drawCharts();
+      bindPage(); if(page==='reportes'&&isOwnerRole())drawCharts();
       if(modal)bindModal();
     }
-    function renderPage(){switch(page){case'ventas':return salesPage();case'gastos':return expensesPage();case'inventario':return inventoryPage();case'clientes':return contactsPage('clientes');case'proveedores':return contactsPage('proveedores');case'deudas':return debtsPage();case'reportes':return reportsPage();case'catalogo':return catalogPage();default:return homePage()}}
+    function renderPage(){
+      if(isSellerRole()&&['gastos','proveedores','reportes','equipo'].includes(page))page='inicio';
+      switch(page){case'ventas':return salesPage();case'gastos':return expensesPage();case'inventario':return inventoryPage();case'clientes':return contactsPage('clientes');case'proveedores':return contactsPage('proveedores');case'deudas':return debtsPage();case'reportes':return reportsPage();case'catalogo':return catalogPage();case'equipo':return teamPage();default:return homePage()}
+    }
     function homePage(){
       const{sales,expenses}=dataInPeriod();
       const sale=totalSales(sales),expense=totalExpenses(expenses),profit=sale-expense;
@@ -111,14 +584,19 @@
         pendingCount?`<button class="home-alert" data-page="deudas">⏳ ${money(pendingTotal)} por cobrar (${pendingCount}) →</button>`:'',
         stockLow?`<button class="home-alert warn" data-page="inventario">⚠️ ${stockLow} producto(s) con stock bajo →</button>`:''
       ].filter(Boolean).join('');
-      return `${head(esc(state.settings.business||'Inicio'),'Resumen de los últimos 30 días.',actions)}<div class="home-stats"><div class="card stat-card"><div class="stat-label">Ventas</div><div class="stat-val">${money(sale)}</div><div class="stat-foot">${sales.length} nota(s)</div></div><div class="card stat-card"><div class="stat-label">Balance</div><div class="stat-val">${money(profit)}</div><div class="stat-foot">Gastos: ${money(expense)}</div></div></div>${alerts?`<div class="home-alerts">${alerts}</div>`:''}<div class="home-quick"><button class="home-quick-btn" data-open="expense">− Gasto</button><button class="home-quick-btn" data-open="product">＋ Producto</button><button class="home-quick-btn" data-open="customer">＋ Cliente</button></div><section class="card table-card" style="margin-top:0"><div class="table-head"><div><h2 class="panel-title">Últimos movimientos</h2></div><button class="text-btn" data-page="ventas">Ver todo ${icon('chevron',13)}</button></div><div class="home-list">${activityList()}</div></section>`;
+      const sellerStats=`<div class="home-stats"><div class="card stat-card"><div class="stat-label">Ventas (30 días)</div><div class="stat-val">${money(sale)}</div><div class="stat-foot">${sales.length} nota(s)</div></div><div class="card stat-card"><div class="stat-label">Productos disponibles</div><div class="stat-val">${state.products.filter(p=>Number(p.stock)>0).length}</div><div class="stat-foot">${state.products.length} en catálogo</div></div></div>`;
+      const ownerStats=`<div class="home-stats"><div class="card stat-card"><div class="stat-label">Ventas</div><div class="stat-val">${money(sale)}</div><div class="stat-foot">${sales.length} nota(s)</div></div><div class="card stat-card"><div class="stat-label">Balance</div><div class="stat-val">${money(profit)}</div><div class="stat-foot">Gastos: ${money(expense)}</div></div></div>`;
+      const quickBar=isSellerRole()
+        ?`<div class="home-quick seller-quick"><button class="home-quick-btn" data-page="inventario">📦 Ver Stock</button><button class="home-quick-btn" data-open="customer">＋ Cliente</button></div>`
+        :`<div class="home-quick"><button class="home-quick-btn" data-open="expense">− Gasto</button><button class="home-quick-btn" data-open="product">＋ Producto</button><button class="home-quick-btn" data-open="customer">＋ Cliente</button></div>`;
+      return `${head(esc(state.settings.business||'Inicio'),isSellerRole()?'Vista de vendedor · Stock sincronizado en vivo.':'Resumen de los últimos 30 días.',actions)}${isSellerRole()?sellerStats:ownerStats}${alerts?`<div class="home-alerts">${alerts}</div>`:''}${quickBar}<section class="card table-card" style="margin-top:0"><div class="table-head"><div><h2 class="panel-title">Últimos movimientos</h2></div><button class="text-btn" data-page="ventas">Ver todo ${icon('chevron',13)}</button></div><div class="home-list">${activityList()}</div></section>`;
     }
     function activityList(){
       const rows=[
         ...state.sales.map(s=>{const items=getSaleItems(s);return{kind:'sale',date:s.date,title:items.length>1?`${items.length} productos`:items[0].product,sub:s.customer||s.payment||'Venta',amount:s.total}}),
-        ...state.expenses.map(e=>({kind:'expense',date:e.date,title:e.name,sub:e.category||'Gasto',amount:e.amount}))
+        ...(isSellerRole()?[]:state.expenses.map(e=>({kind:'expense',date:e.date,title:e.name,sub:e.category||'Gasto',amount:e.amount})))
       ].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,5);
-      if(!rows.length)return `<div class="empty">Todavía no hay actividad. Registra tu primera venta o gasto.</div>`;
+      if(!rows.length)return `<div class="empty">Todavía no hay actividad. Registra tu primera venta.</div>`;
       return `<div class="activity">${rows.map(r=>`<div class="activity-item"><div class="activity-mark ${r.kind==='sale'?'':'out'}">${r.kind==='sale'?'+':'−'}</div><div class="activity-main"><div class="activity-name">${esc(r.title)}</div><div class="activity-meta">${fmtDate(r.date)} · ${esc(r.sub)}</div></div><div class="activity-amount" style="color:${r.kind==='sale'?'#455f27':'#a05b26'}">${r.kind==='sale'?'+':'−'}${money(r.amount)}</div></div>`).join('')}</div>`;
     }
     function toolbar(placeholder='Buscar…',filters=''){return `<div class="toolbar"><div class="searchbox"><span>${icon('search',16)}</span><input id="list-search" value="${esc(search)}" placeholder="${placeholder}" /></div>${filters}</div>`}
@@ -133,21 +611,22 @@
       }).sort((a,b)=>b.date.localeCompare(a.date));
       const filterOpts=[['all','Todas'],['Pendiente','Pendientes'],['Efectivo','Efectivo'],['Tarjeta','Tarjeta'],['Transferencia','Transferencia']];
       const filterChips=`<div class="sale-filter-chips" role="group" aria-label="Filtrar ventas por pago">${filterOpts.map(([val,label])=>`<button type="button" class="sale-filter-chip ${saleFilter===val?'active':''}" data-sale-filter="${val}">${label}${val==='Pendiente'&&pendingCount?`<span class="sale-filter-count">${pendingCount}</span>`:''}</button>`).join('')}</div>`;
+      const canEditSale=isOwnerRole();
       const rows=list.map(s=>{
         const items=getSaleItems(s),label=items.map(i=>i.product).join(', '),units=items.reduce((a,i)=>a+i.qty,0),pend=pending(s);
-        return `<tr><td class="sale-col-main"><div class="table-main"><span class="sale-folio-tag">#${esc(s.folio||'0001')}</span>${esc(label)}</div><div class="table-sub">${units} ud(s)${s.customer?' · '+esc(s.customer):''}</div></td><td class="sale-col-meta"><span>${fmtDate(s.date)} · ${esc(s.payment)}</span>${pend>0?`<span class="badge orange">Pendiente ${money(pend)}</span>`:`<span class="badge green">Pagada</span>`}</td><td class="money sale-col-total" style="text-align:right">${money(s.total)}</td><td><div class="inline-actions">${pend>0?`<button class="text-btn" style="color:var(--orange-dark);font-weight:750" data-action="collect:${s.id}">Cobrar</button>`:''}<button class="text-btn" data-action="receipt:${s.id}" title="Ver comprobante">Ver nota</button><button class="text-btn" data-edit="sale" data-id="${s.id}" aria-label="Editar">${icon('edit',14)} Editar</button><button class="text-btn delete-action" data-delete="sale" data-id="${s.id}" aria-label="Eliminar nota">${icon('trash',14)}</button></div></td></tr>`;
+        return `<tr><td class="sale-col-main"><div class="table-main"><span class="sale-folio-tag">#${esc(s.folio||'0001')}</span>${esc(label)}</div><div class="table-sub">${units} ud(s)${s.customer?' · '+esc(s.customer):''}${s.seller?' · Vendió: '+esc(s.seller):''}</div></td><td class="sale-col-meta"><span>${fmtDate(s.date)} · ${esc(s.payment)}</span>${pend>0?`<span class="badge orange">Pendiente ${money(pend)}</span>`:`<span class="badge green">Pagada</span>`}</td><td class="money sale-col-total" style="text-align:right">${money(s.total)}</td><td><div class="inline-actions">${pend>0?`<button class="text-btn" style="color:var(--orange-dark);font-weight:750" data-action="collect:${s.id}">Cobrar</button>`:''}<button class="text-btn" data-action="receipt:${s.id}" title="Ver comprobante">Ver nota</button>${canEditSale?`<button class="text-btn" data-edit="sale" data-id="${s.id}" aria-label="Editar">${icon('edit',14)} Editar</button><button class="text-btn delete-action" data-delete="sale" data-id="${s.id}" aria-label="Eliminar nota">${icon('trash',14)}</button>`:''}</div></td></tr>`;
       });
       const subSummary=list.length===state.sales.length?`${state.sales.length} nota(s) · ${money(totalSales(list))}`:`${list.length} de ${state.sales.length} nota(s) · ${money(totalSales(list))}`;
       return `${head('Ventas','Registra ventas rápido y consulta tus notas.',`<button class="btn btn-lime" data-open="sale">${icon('plus',15)} Nueva venta</button>`)}${toolbar('Buscar producto, cliente o #folio…')}${filterChips}${tableShell('Historial de ventas',subSummary,rows,'<th>Nota</th><th>Fecha, pago y estado</th><th style="text-align:right">Total</th><th></th>',q||saleFilter!=='all'?'No hay ventas que coincidan con este filtro.':'No hay ventas todavía. Registra tu primera venta para empezar.','sales-table')}`;
     }
     function expensesPage(){const list=state.expenses.filter(e=>(e.name+' '+e.category+' '+e.payment).toLowerCase().includes(search.toLowerCase())).sort((a,b)=>b.date.localeCompare(a.date));const rows=list.map(e=>`<tr><td><div class="table-main">${esc(e.name)}</div><div class="table-sub">${esc(e.notes||e.category||'')}</div></td><td>${fmtDate(e.date)}</td><td>${esc(e.category||'—')}</td><td>${esc(e.payment||'—')}</td><td class="money" style="text-align:right">${money(e.amount)}</td><td><div class="inline-actions"><button class="text-btn" data-edit="expense" data-id="${e.id}">${icon('edit',14)} Editar</button><button class="text-btn delete-action" data-delete="expense" data-id="${e.id}">${icon('trash',14)} Eliminar</button></div></td></tr>`);return `${head('Gastos','Anota las salidas de dinero para entender mejor tus costos.',`<button class="btn btn-lime" data-open="expense">${icon('plus',15)} Nuevo gasto</button>`)}${toolbar('Buscar gasto o categoría…')}${tableShell('Gastos registrados',`${state.expenses.length} movimiento(s) · ${money(totalExpenses())}`,rows,'<th>Concepto</th><th>Fecha</th><th>Categoría</th><th>Forma de pago</th><th style="text-align:right">Importe</th><th></th>','Aún no tienes gastos registrados.')}`}
     function inventoryPage(){
-      const q=search.trim().toLowerCase();
+      const q=search.trim().toLowerCase(),owner=isOwnerRole();
       const categories=['Todas',...new Set(state.products.map(p=>p.category||'Productos'))].sort((a,b)=>a==='Todas'?-1:b==='Todas'?1:a.localeCompare(b,'es-MX'));
       const lowCount=state.products.filter(p=>Number(p.stock)<=Number(p.min)).length;
       const outCount=state.products.filter(p=>Number(p.stock)<=0).length;
       const list=state.products.filter(p=>{
-        const matchQ=!q||(p.name+' '+(p.category||'')+' '+p.price+' '+p.cost+' '+p.stock).toLowerCase().includes(q);
+        const matchQ=!q||(p.name+' '+(p.category||'')+' '+p.price+' '+(owner?p.cost:'')+' '+p.stock).toLowerCase().includes(q);
         const matchStock=stockFilter==='all'||(stockFilter==='low'?Number(p.stock)<=Number(p.min):Number(p.stock)<=0);
         const matchCat=invCategory==='Todas'||(p.category||'Productos')===invCategory;
         return matchQ&&matchStock&&matchCat;
@@ -158,16 +637,21 @@
       const rows=list.map(p=>{
         const st=Number(p.stock)||0,mn=Number(p.min)||0,margin=(Number(p.price)||0)-(Number(p.cost)||0);
         const badge=st<=0?`<span class="badge red">0 · Agotado</span>`:st<=mn?`<span class="badge orange">${st} · Bajo (mín. ${mn})</span>`:`<span class="badge green">${st} disp.</span>`;
-        return `<tr class="${st<=mn?'low-row':''}"><td class="inv-col-main"><div class="stock-name"><button type="button" class="product-thumb photo-zoom-trigger" data-zoom-product="${esc(p.id)}" title="Ver imagen grande" aria-label="Agrandar imagen de ${esc(p.name)}">${productArt(p)}</button><div class="inv-title-wrap"><div class="table-main">${esc(p.name)}</div><div class="table-sub">${esc(p.category||'Sin categoría')}</div></div></div></td><td class="money inv-col-price">${money(p.price)}<div class="table-sub"><span class="inv-cost-inline">Costo ${money(p.cost)} · </span>Gan. ${money(margin)}</div></td><td class="inv-col-stock">${badge}</td><td class="inv-col-cost">Costo ${money(p.cost)}</td><td><div class="inline-actions"><button class="text-btn" style="font-weight:740" data-action="adjust:${p.id}">± Stock</button><button class="text-btn" data-edit="product" data-id="${p.id}" aria-label="Editar">${icon('edit',14)} Editar</button><button class="text-btn delete-action" data-delete="product" data-id="${p.id}" aria-label="Eliminar producto">${icon('trash',14)}</button></div></td></tr>`;
+        const priceSub=owner?`<div class="table-sub"><span class="inv-cost-inline">Costo ${money(p.cost)} · </span>Gan. ${money(margin)}</div>`:'';
+        const actions=owner
+          ?`<button class="text-btn" style="font-weight:740" data-action="adjust:${p.id}">± Stock</button><button class="text-btn" data-edit="product" data-id="${p.id}" aria-label="Editar">${icon('edit',14)} Editar</button><button class="text-btn delete-action" data-delete="product" data-id="${p.id}" aria-label="Eliminar producto">${icon('trash',14)}</button>`
+          :`<button class="text-btn" style="font-weight:740" data-action="adjust:${p.id}">＋ Sumar stock</button>`;
+        return `<tr class="${st<=mn?'low-row':''}"><td class="inv-col-main"><div class="stock-name"><button type="button" class="product-thumb photo-zoom-trigger" data-zoom-product="${esc(p.id)}" title="Ver imagen grande" aria-label="Agrandar imagen de ${esc(p.name)}">${productArt(p)}</button><div class="inv-title-wrap"><div class="table-main">${esc(p.name)}</div><div class="table-sub">${esc(p.category||'Sin categoría')}</div></div></div></td><td class="money inv-col-price">${money(p.price)}${priceSub}</td><td class="inv-col-stock">${badge}</td>${owner?`<td class="inv-col-cost">Costo ${money(p.cost)}</td>`:''}<td><div class="inline-actions">${actions}</div></td></tr>`;
       });
       const sizeOpts=[['sm','Chica'],['md','Mediana'],['lg','Grande']];
       const sizeSwitch=`<div class="inv-size-switch" role="group" aria-label="Tamaño de imagen">${sizeOpts.map(([val,label])=>`<button type="button" class="inv-size-btn ${invPhotoSize===val?'active':''}" data-inv-size="${val}">${label}</button>`).join('')}</div>`;
       const listUnits=list.reduce((a,p)=>a+(Number(p.stock)||0),0),listRetail=list.reduce((a,p)=>a+(Number(p.price)||0)*(Number(p.stock)||0),0);
-      const subSummary=`${list.length}${list.length!==state.products.length?' de '+state.products.length:''} producto(s) · ${listUnits} ud(s) · valor venta ${money(listRetail)}`;
-      return `${head('Inventario','Controla existencias, precios y alertas de resurtido.',`<button class="btn btn-lime" data-open="product">${icon('plus',15)} Agregar producto</button>`)}${toolbar('Buscar producto, categoría o precio…')}${statusChips}${catChips}${tableShell('Productos',subSummary,rows,'<th>Producto</th><th>Precio</th><th>Existencias</th><th>Costo</th><th></th>',q||stockFilter!=='all'||invCategory!=='Todas'?'No hay productos con ese filtro.':'Agrega tus productos para llevar tu inventario al día.',`inv-table thumb-${invPhotoSize}`,sizeSwitch)}`;
+      const subSummary=`${list.length}${list.length!==state.products.length?' de '+state.products.length:''} producto(s) · ${listUnits} ud(s)${owner?' · valor venta '+money(listRetail):''}`;
+      const cols=owner?'<th>Producto</th><th>Precio</th><th>Existencias</th><th>Costo</th><th></th>':'<th>Producto</th><th>Precio</th><th>Existencias</th><th></th>';
+      return `${head('Inventario',owner?'Controla existencias, precios y alertas de resurtido.':'Consulta existencias en tiempo real o suma nuevas entradas.',owner?`<button class="btn btn-lime" data-open="product">${icon('plus',15)} Agregar producto</button>`:'')}${toolbar('Buscar producto, categoría o precio…')}${statusChips}${catChips}${tableShell('Productos',subSummary,rows,cols,q||stockFilter!=='all'||invCategory!=='Todas'?'No hay productos con ese filtro.':'Agrega tus productos para llevar tu inventario al día.',`inv-table thumb-${invPhotoSize}`,sizeSwitch)}`;
     }
-    function contactsPage(type){const isCustomer=type==='clientes',items=isCustomer?state.customers:state.suppliers,title=isCustomer?'Clientes':'Proveedores',kind=isCustomer?'customer':'supplier';const list=items.filter(x=>(x.name+' '+(x.phone||'')+' '+(x.notes||'')).toLowerCase().includes(search.toLowerCase()));const rows=list.map(x=>`<tr><td><div class="table-main">${esc(x.name)}</div><div class="table-sub">${esc(x.notes||'')}</div></td><td>${esc(x.phone||'—')}</td>${isCustomer?`<td>${money(state.sales.filter(s=>s.customer===x.name).reduce((a,s)=>a+s.total,0))}</td><td>${money(state.sales.filter(s=>s.customer===x.name).reduce((a,s)=>a+pending(s),0))}</td>`:`<td>${esc(x.email||'—')}</td>`}<td><div class="inline-actions"><button class="text-btn" data-edit="${kind}" data-id="${x.id}">Editar</button><button class="text-btn delete-action" data-delete="${type==='clientes'?'customer':'supplier'}" data-id="${x.id}">${icon('trash',14)} Eliminar</button></div></td></tr>`);const cols=isCustomer?'<th>Nombre</th><th>Teléfono</th><th>Compras</th><th>Por cobrar</th><th></th>':'<th>Proveedor</th><th>Teléfono</th><th>Correo</th><th></th>';return `${head(title,isCustomer?'Organiza tus contactos y consulta sus compras o saldos.':'Guarda los datos de quienes abastecen tu negocio.',`<button class="btn btn-lime" data-open="${kind}">${icon('plus',15)} Agregar ${isCustomer?'cliente':'proveedor'}</button>`)}${toolbar(isCustomer?'Buscar cliente…':'Buscar proveedor…')}${tableShell(title,`${items.length} contacto(s)`,rows,cols,`Todavía no hay ${isCustomer?'clientes':'proveedores'} guardados.`)}`}
-    function debtsPage(){const list=state.sales.filter(s=>pending(s)>0).sort((a,b)=>b.date.localeCompare(a.date));const total=list.reduce((a,s)=>a+pending(s),0);const rows=list.map(s=>`<tr><td><div class="table-main">${esc(s.customer||'Cliente sin nombre')}</div><div class="table-sub">${esc(getSaleItems(s).map(item=>item.product).join(', '))} · ${fmtDate(s.date)}</div></td><td>${money(s.total)}</td><td>${money(s.paid)}</td><td class="money">${money(pending(s))}</td><td><div class="inline-actions"><button class="btn btn-light btn-sm" data-action="collect:${s.id}">Registrar abono</button><button class="btn btn-light btn-sm" data-edit="sale" data-id="${s.id}">Editar nota</button></div></td></tr>`);return `${head('Por cobrar','Da seguimiento a ventas que todavía tienen saldo pendiente.')}<div class="kpi-banner"><div><h3>Saldo total pendiente</h3><p>Se calcula a partir de las ventas registradas como pendientes o con abono.</p></div><div class="amount">${money(total)}</div></div>${tableShell('Cuentas pendientes',`${list.length} saldo(s) abierto(s)`,rows,'<th>Cliente / venta</th><th>Total venta</th><th>Abonado</th><th>Saldo</th><th></th>','No hay cuentas pendientes. ¡Todo al corriente!')}`}
+    function contactsPage(type){const isCustomer=type==='clientes',items=isCustomer?state.customers:state.suppliers,title=isCustomer?'Clientes':'Proveedores',kind=isCustomer?'customer':'supplier',owner=isOwnerRole();const list=items.filter(x=>(x.name+' '+(x.phone||'')+' '+(x.notes||'')).toLowerCase().includes(search.toLowerCase()));const rows=list.map(x=>`<tr><td><div class="table-main">${esc(x.name)}</div><div class="table-sub">${esc(x.notes||'')}</div></td><td>${esc(x.phone||'—')}</td>${isCustomer?`<td>${money(state.sales.filter(s=>s.customer===x.name).reduce((a,s)=>a+s.total,0))}</td><td>${money(state.sales.filter(s=>s.customer===x.name).reduce((a,s)=>a+pending(s),0))}</td>`:`<td>${esc(x.email||'—')}</td>`}<td><div class="inline-actions"><button class="text-btn" data-edit="${kind}" data-id="${x.id}">Editar</button>${owner?`<button class="text-btn delete-action" data-delete="${type==='clientes'?'customer':'supplier'}" data-id="${x.id}">${icon('trash',14)} Eliminar</button>`:''}</div></td></tr>`);const cols=isCustomer?'<th>Nombre</th><th>Teléfono</th><th>Compras</th><th>Por cobrar</th><th></th>':'<th>Proveedor</th><th>Teléfono</th><th>Correo</th><th></th>';return `${head(title,isCustomer?'Organiza tus contactos y consulta sus compras o saldos.':'Guarda los datos de quienes abastecen tu negocio.',`<button class="btn btn-lime" data-open="${kind}">${icon('plus',15)} Agregar ${isCustomer?'cliente':'proveedor'}</button>`)}${toolbar(isCustomer?'Buscar cliente…':'Buscar proveedor…')}${tableShell(title,`${items.length} contacto(s)`,rows,cols,`Todavía no hay ${isCustomer?'clientes':'proveedores'} guardados.`)}`}
+    function debtsPage(){const owner=isOwnerRole(),list=state.sales.filter(s=>pending(s)>0).sort((a,b)=>b.date.localeCompare(a.date));const total=list.reduce((a,s)=>a+pending(s),0);const rows=list.map(s=>`<tr><td><div class="table-main">${esc(s.customer||'Cliente sin nombre')}</div><div class="table-sub">${esc(getSaleItems(s).map(item=>item.product).join(', '))} · ${fmtDate(s.date)}</div></td><td>${money(s.total)}</td><td>${money(s.paid)}</td><td class="money">${money(pending(s))}</td><td><div class="inline-actions"><button class="btn btn-light btn-sm" data-action="collect:${s.id}">Registrar abono</button>${owner?`<button class="btn btn-light btn-sm" data-edit="sale" data-id="${s.id}">Editar nota</button>`:''}</div></td></tr>`);return `${head('Por cobrar','Da seguimiento a ventas que todavía tienen saldo pendiente.')}<div class="kpi-banner"><div><h3>Saldo total pendiente</h3><p>Se calcula a partir de las ventas registradas como pendientes o con abono.</p></div><div class="amount">${money(total)}</div></div>${tableShell('Cuentas pendientes',`${list.length} saldo(s) abierto(s)`,rows,'<th>Cliente / venta</th><th>Total venta</th><th>Abonado</th><th>Saldo</th><th></th>','No hay cuentas pendientes. ¡Todo al corriente!')}`}
     function reportsPage(){
       const{sales,expenses}=dataInPeriod();
       const sale=totalSales(sales),exp=totalExpenses(expenses),balance=sale-exp;
@@ -190,13 +674,36 @@
       const periodChips=`<div class="sale-filter-chips" role="group" aria-label="Periodo de reportes">${periodOpts.map(([val,label])=>`<button type="button" class="sale-filter-chip ${period===val?'active':''}" data-report-period="${val}">${label}</button>`).join('')}</div>`;
       return `${head('Reportes','Resumen claro de tus ventas, gastos y pagos.',`<button class="btn btn-light" data-action="export">${icon('export',15)} Exportar datos</button>`)}${periodChips}<div class="report-kpis"><section class="report-hero"><div class="report-hero-top"><span class="report-hero-label">Balance · ${period==='all'?'Historial completo':'Últimos '+period+' días'}</span>${sale>0?`<span class="report-hero-badge ${balance<0?'neg':''}">${balance>=0?'+':''}${marginPct}% margen</span>`:''}</div><div class="report-hero-val">${money(balance)}</div><div class="report-hero-pills"><span class="report-hero-pill">Ventas <strong>${money(sale)}</strong> (${sales.length})</span><span class="report-hero-pill">Gastos <strong>${money(exp)}</strong> (${expenses.length})</span>${collected<sale?`<span class="report-hero-pill">Cobrado <strong>${money(collected)}</strong></span>`:''}</div></section><div class="card report-mini"><div class="stat-label">Ticket promedio</div><div class="stat-val">${money(avgTicket)}</div><div class="stat-foot">${unitsSold} unidad(es) vendidas</div></div>${pendingCount?`<button type="button" class="card report-mini report-mini-btn" data-page="deudas"><div class="stat-label">Por cobrar</div><div class="stat-val" style="color:var(--orange-dark)">${money(totalPending)}</div><div class="stat-foot">${pendingCount} nota(s) pendiente(s) →</div></button>`:`<div class="card report-mini"><div class="stat-label">Por cobrar</div><div class="stat-val">${money(0)}</div><div class="stat-foot">Sin saldos pendientes</div></div>`}</div><div class="grid report-grid"><section class="card panel"><div class="panel-head"><div><h2 class="panel-title">Ventas y gastos</h2><p class="panel-note">${period==='all'?'Historial completo':'Últimos '+period+' días'}</p></div><div class="chart-legend"><span><i class="chart-dot" style="background:#cde95d"></i>Ventas</span><span><i class="chart-dot" style="background:#edc99e"></i>Gastos</span></div></div>${sales.length||expenses.length?`<div class="chart-wrap"><canvas id="main-chart"></canvas></div>`:`<div class="empty">Sin movimientos en este periodo.</div>`}</section><section class="card panel"><div class="panel-head"><div><h2 class="panel-title">Cobros por método</h2><p class="panel-note">Distribución de ventas del periodo</p></div></div>${payRows.length?`<div class="pay-stack">${payRows.map(([k,v])=>`<div class="pay-seg" style="width:${Math.max(4,v.val/(sale||1)*100)}%;background:${payColors[k]||'#95a398'}" title="${esc(k)}: ${money(v.val)}"></div>`).join('')}</div><div class="pay-list">${payRows.map(([k,v])=>`<div class="pay-row"><div class="pay-row-left"><i class="chart-dot" style="background:${payColors[k]||'#95a398'}"></i><span class="pay-row-name">${esc(k)}</span><span class="pay-row-sub">${v.count} nota(s) · ${sale>0?Math.round(v.val/sale*100):0}%</span></div><span class="pay-row-val">${money(v.val)}</span></div>`).join('')}</div>`:`<div class="empty">Todavía no hay ventas en este periodo.</div>`}</section><section class="card panel"><div class="panel-head"><div><h2 class="panel-title">Productos más vendidos</h2><p class="panel-note">Por importe vendido en el periodo</p></div></div>${top.length?`<div class="report-rank">${top.map(([name,info])=>`<div class="report-rank-item"><div class="report-rank-top"><span class="report-rank-name">${esc(name)}<span class="report-rank-sub">${info.qty} ud(s)</span></span><strong class="report-rank-val">${money(info.val)}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(4,info.val/(top[0][1].val||1)*100)}%"></div></div></div>`).join('')}</div>`:`<div class="empty">Todavía no hay ventas para comparar.</div>`}</section><section class="card panel"><div class="panel-head"><div><h2 class="panel-title">Gastos por categoría</h2><p class="panel-note">Distribución de salidas</p></div></div>${cat.length?`<div class="report-rank">${cat.map(([name,val])=>`<div class="report-rank-item"><div class="report-rank-top"><span class="report-rank-name">${esc(name)}<span class="report-rank-sub">${exp>0?Math.round(val/exp*100):0}%</span></span><strong class="report-rank-val">${money(val)}</strong></div><div class="bar-track"><div class="bar-fill expense" style="width:${Math.max(4,val/(cat[0][1]||1)*100)}%"></div></div></div>`).join('')}</div>`:`<div class="empty">Aún no hay gastos en este periodo.</div>`}</section><section class="card panel" style="grid-column:1/-1"><div class="panel-head"><div><h2 class="panel-title">Valor del inventario</h2><p class="panel-note">${state.products.length} producto(s) · ${invUnits} unidad(es) en existencia</p></div><button type="button" class="text-btn" data-page="inventario">Ver stock ${icon('chevron',13)}</button></div><div class="report-inv-grid"><div class="report-inv-box"><span>Costo en stock</span><strong>${money(invCost)}</strong></div><div class="report-inv-box"><span>Valor a precio de venta</span><strong>${money(invRetail)}</strong></div><div class="report-inv-box"><span>Ganancia potencial</span><strong style="color:#455f27">${money(invRetail-invCost)}</strong></div></div></section></div>`;
     }
-    function catalogPage(){const list=state.products.filter(p=>(p.name+' '+p.category+' '+p.price+' '+p.stock+' '+p.min).toLowerCase().includes(search.toLowerCase()));return `${head('Catálogo','Una vista sencilla de los productos disponibles para compartir.',`<button class="btn btn-light" data-action="copy-catalog">Compartir catálogo</button><button class="btn btn-lime" data-open="product">${icon('plus',15)} Agregar producto</button>`)}<div class="notice">Esta vista usa los productos guardados en este dispositivo. Comparte la lista desde aquí; aún no publica una tienda en internet.</div>${toolbar('Buscar en el catálogo…')}${list.length?`<div class="grid catalog-grid">${list.map(p=>`<article class="card catalog-card"><button type="button" class="catalog-art photo-zoom-trigger" data-zoom-product="${esc(p.id)}" title="Ver imagen grande" aria-label="Agrandar imagen de ${esc(p.name)}">${productArt(p)}</button><div class="catalog-body"><div class="catalog-name">${esc(p.name)}</div><div class="catalog-meta"><span>${esc(p.category||'Producto')}</span><span>${p.stock>0?'Disponible':'Agotado'}</span></div><div class="catalog-price">${money(p.price)}</div></div></article>`).join('')}</div>`:`<div class="card empty">No hay productos en el catálogo.</div>`}`}
+    function catalogPage(){
+      const owner=isOwnerRole(),link=isCloudActive()?catalogUrlFor():'';
+      const list=state.products.filter(p=>(p.name+' '+p.category+' '+p.price+' '+p.stock+' '+p.min).toLowerCase().includes(search.toLowerCase()));
+      const notice=link
+        ?`<div class="notice catalog-link-box"><div><strong>Enlace público para compradores</strong><span>Tus clientes ven solo productos disponibles, fotos y precios (sin costos ni gastos).</span><code class="catalog-url">${esc(link)}</code></div><div class="catalog-link-btns"><button type="button" class="btn btn-primary btn-sm" data-copy-link>Copiar link</button><button type="button" class="btn btn-light btn-sm" data-preview-public>Vista cliente</button></div></div>`
+        :`<div class="notice">Conecta tu cuenta en la nube para generar un enlace público en vivo para tus compradores.</div>`;
+      return `${head('Catálogo','Vista lista para compartir con tus compradores.',`<button class="btn btn-light" data-action="copy-catalog">${link?'Enviar link / lista':'Compartir catálogo'}</button>${owner?`<button class="btn btn-lime" data-open="product">${icon('plus',15)} Agregar producto</button>`:''}`)}${notice}${toolbar('Buscar en el catálogo…')}${list.length?`<div class="grid catalog-grid">${list.map(p=>`<article class="card catalog-card"><button type="button" class="catalog-art photo-zoom-trigger" data-zoom-product="${esc(p.id)}" title="Ver imagen grande" aria-label="Agrandar imagen de ${esc(p.name)}">${productArt(p)}</button><div class="catalog-body"><div class="catalog-name">${esc(p.name)}</div><div class="catalog-meta"><span>${esc(p.category||'Producto')}</span><span>${p.stock>0?'Disponible':'Agotado'}</span></div><div class="catalog-price">${money(p.price)}</div></div></article>`).join('')}</div>`:`<div class="card empty">No hay productos en el catálogo.</div>`}`;
+    }
+    function teamPage(){
+      if(!cloud.user){
+        return `${head('Equipo y Nube','Conecta una cuenta para sincronizar varios celulares, invitar dueños o vendedores y publicar tu catálogo.')}<section class="card panel team-empty-card"><h2 class="panel-title">Aún estás en modo local</h2><p class="panel-note" style="margin:8px 0 16px">Inicia sesión o crea tu cuenta gratis en Firebase para respaldar tus datos en la nube y compartir el inventario en vivo entre teléfonos.</p><div class="head-actions"><button class="btn btn-primary" data-action="auth">Iniciar sesión / Crear cuenta</button></div></section>`;
+      }
+      if(!cloud.storeId){
+        return `${head('Equipo y Nube','Configura o únete a un negocio en la nube.')}<section class="card panel"><h2 class="panel-title">Cuenta lista: ${esc(cloud.user.email)}</h2><p class="panel-note" style="margin:8px 0 16px">Crea tu negocio como dueño (puedes subir tus productos locales) o únete a uno existente con un código.</p><button class="btn btn-primary" data-action="onboarding">Configurar negocio</button></section>`;
+      }
+      const link=catalogUrlFor();
+      const activeInvites=cloud.invites.filter(inv=>inv.active&&!inv.usedBy);
+      const memberRows=cloud.members.map(m=>{
+        const isSelf=m.uid===cloud.user.uid;
+        return `<div class="team-row"><div class="team-user"><div class="user-pill">${esc((m.name||m.email||'U').slice(0,1).toUpperCase())}</div><div><div class="table-main">${esc(m.name||'Sin nombre')}${isSelf?' (Tú)':''}</div><div class="table-sub">${esc(m.email||'')}</div></div></div><div class="team-controls"><span class="role-pill ${m.role}">${m.role==='owner'?'Dueño':'Vendedor'}</span>${!isSelf?`<button type="button" class="btn btn-light btn-sm" data-member-role="${esc(m.uid)}" data-next-role="${m.role==='owner'?'seller':'owner'}">${m.role==='owner'?'Hacer vendedor':'Hacer dueño'}</button><button type="button" class="text-btn delete-action" data-member-remove="${esc(m.uid)}">Quitar</button>`:''}</div></div>`;
+      }).join('');
+      const inviteRows=activeInvites.length?activeInvites.map(inv=>`<div class="team-row"><div><div class="table-main"><code class="invite-code-pill">${esc(inv.code)}</code> <span class="role-pill ${inv.role}">${inv.role==='owner'?'Dueño':'Vendedor'}</span></div><div class="table-sub">Un solo uso · Comparte este código con quien se unirá</div></div><div class="team-controls"><button type="button" class="btn btn-light btn-sm" data-copy-invite="${esc(inv.code)}">Copiar</button><button type="button" class="text-btn delete-action" data-revoke-invite="${esc(inv.code)}">Revocar</button></div></div>`).join(''):`<div class="empty" style="padding:20px">No hay códigos pendientes. Genera uno arriba cuando invites a otro dueño o vendedor.</div>`;
+      return `${head('Equipo y Nube',`${esc(state.settings.business)} · Sincronización activa`,`<button class="btn btn-light" data-action="account">Mi cuenta</button>`)}${`<section class="card panel" style="margin-bottom:16px"><div class="panel-head"><div><h2 class="panel-title">Enlace para compradores</h2><p class="panel-note">Compártelo para que tus clientes vean el catálogo disponible sin iniciar sesión.</p></div></div><div class="catalog-link-box" style="margin:0"><code class="catalog-url">${esc(link)}</code><div class="catalog-link-btns"><button type="button" class="btn btn-primary btn-sm" data-copy-link>Copiar link</button><button type="button" class="btn btn-light btn-sm" data-preview-public>Abrir vista cliente</button></div></div></section><section class="card panel" style="margin-bottom:16px"><div class="panel-head"><div><h2 class="panel-title">Invitar dueño o vendedor</h2><p class="panel-note">El código define automáticamente el rol cuando la otra persona se registre o entre.</p></div></div><div class="invite-gen-row"><button type="button" class="btn btn-lime" data-gen-invite="seller">＋ Código de Vendedor</button><button type="button" class="btn btn-light" data-gen-invite="owner">＋ Código de Dueño (socio)</button></div><div class="team-list">${inviteRows}</div></section><section class="card panel"><div class="panel-head"><div><h2 class="panel-title">Miembros del negocio (${cloud.members.length})</h2><p class="panel-note">Si eres tú mismo en 2 celulares, basta iniciar sesión con tu misma cuenta (${esc(cloud.user.email)}).</p></div></div><div class="team-list">${memberRows}</div></section>`}`;
+    }
     function closePhotoZoom(){const el=document.getElementById('photo-zoom-out');if(el){el.remove();return true}return false}
     function openPhotoZoom({photo,emoji,title,subtitle,priceText,productId}){
       closePhotoZoom();
       const wrap=document.createElement('div');
       wrap.className='modal-backdrop zoom-backdrop';wrap.id='photo-zoom-out';
-      wrap.innerHTML=`<section class="modal zoom-modal" role="dialog" aria-modal="true" aria-label="Vista ampliada de imagen"><div class="modal-head" style="margin-bottom:12px"><div><h2 class="modal-title">${esc(title||'Imagen del producto')}</h2>${subtitle?`<p class="modal-desc">${esc(subtitle)}</p>`:''}</div><button type="button" class="modal-close" data-zoom-close aria-label="Cerrar">×</button></div><div class="zoom-stage">${productArt({photo,emoji})}</div>${priceText?`<div class="zoom-meta"><span>Precio de venta</span><strong>${esc(priceText)}</strong></div>`:''}<div class="modal-actions" style="margin-top:14px">${productId&&!modal?`<button type="button" class="btn btn-light" data-zoom-edit="${esc(productId)}">Editar producto</button>`:''}<button type="button" class="btn btn-primary" data-zoom-close>Cerrar</button></div></section>`;
+      wrap.innerHTML=`<section class="modal zoom-modal" role="dialog" aria-modal="true" aria-label="Vista ampliada de imagen"><div class="modal-head" style="margin-bottom:12px"><div><h2 class="modal-title">${esc(title||'Imagen del producto')}</h2>${subtitle?`<p class="modal-desc">${esc(subtitle)}</p>`:''}</div><button type="button" class="modal-close" data-zoom-close aria-label="Cerrar">×</button></div><div class="zoom-stage">${productArt({photo,emoji})}</div>${priceText?`<div class="zoom-meta"><span>Precio de venta</span><strong>${esc(priceText)}</strong></div>`:''}<div class="modal-actions" style="margin-top:14px">${productId&&!modal&&isOwnerRole()?`<button type="button" class="btn btn-light" data-zoom-edit="${esc(productId)}">Editar producto</button>`:''}<button type="button" class="btn btn-primary" data-zoom-close>Cerrar</button></div></section>`;
       wrap.addEventListener('click',e=>{
         if(e.target===wrap||e.target.closest('[data-zoom-close]')){closePhotoZoom();return}
         const editBtn=e.target.closest('[data-zoom-edit]');
@@ -204,26 +711,65 @@
       });
       document.body.appendChild(wrap);
     }
-    function bindPage(){const searchInput=document.getElementById('list-search');if(searchInput){searchInput.addEventListener('input',e=>{const pos=e.target.selectionStart;search=e.target.value;render();const fresh=document.getElementById('list-search');fresh?.focus();fresh?.setSelectionRange(pos,pos)})}const p=document.getElementById('period-select');if(p)p.addEventListener('change',e=>{period=e.target.value;render()});document.querySelectorAll('[data-report-period]').forEach(btn=>btn.addEventListener('click',()=>{period=btn.dataset.reportPeriod;render()}));document.querySelectorAll('[data-sale-filter]').forEach(btn=>btn.addEventListener('click',()=>{saleFilter=btn.dataset.saleFilter;render()}));document.querySelectorAll('[data-stock-filter]').forEach(btn=>btn.addEventListener('click',()=>{stockFilter=btn.dataset.stockFilter;render()}));document.querySelectorAll('[data-inv-cat]').forEach(btn=>btn.addEventListener('click',()=>{invCategory=btn.dataset.invCat;render()}));document.querySelectorAll('[data-inv-size]').forEach(btn=>btn.addEventListener('click',()=>{invPhotoSize=btn.dataset.invSize;try{localStorage.setItem('notas-inv-photo-size',invPhotoSize)}catch{}render()}));document.querySelectorAll('[data-zoom-product]').forEach(btn=>btn.addEventListener('click',()=>{const prod=getProduct(btn.dataset.zoomProduct);if(!prod)return;openPhotoZoom({photo:prod.photo,emoji:prod.emoji,title:prod.name,subtitle:`${prod.category||'Sin categoría'} · Stock: ${Number(prod.stock)||0}`,priceText:money(prod.price),productId:prod.id})}))}
+    function bindPage(){
+      const searchInput=document.getElementById('list-search');
+      if(searchInput){searchInput.addEventListener('input',e=>{const pos=e.target.selectionStart;search=e.target.value;render();const fresh=document.getElementById('list-search');fresh?.focus();fresh?.setSelectionRange(pos,pos)})}
+      const p=document.getElementById('period-select');if(p)p.addEventListener('change',e=>{period=e.target.value;render()});
+      document.querySelectorAll('[data-report-period]').forEach(btn=>btn.addEventListener('click',()=>{period=btn.dataset.reportPeriod;render()}));
+      document.querySelectorAll('[data-sale-filter]').forEach(btn=>btn.addEventListener('click',()=>{saleFilter=btn.dataset.saleFilter;render()}));
+      document.querySelectorAll('[data-stock-filter]').forEach(btn=>btn.addEventListener('click',()=>{stockFilter=btn.dataset.stockFilter;render()}));
+      document.querySelectorAll('[data-inv-cat]').forEach(btn=>btn.addEventListener('click',()=>{invCategory=btn.dataset.invCat;render()}));
+      document.querySelectorAll('[data-inv-size]').forEach(btn=>btn.addEventListener('click',()=>{invPhotoSize=btn.dataset.invSize;try{localStorage.setItem('notas-inv-photo-size',invPhotoSize)}catch{}render()}));
+      document.querySelectorAll('[data-zoom-product]').forEach(btn=>btn.addEventListener('click',()=>{const prod=getProduct(btn.dataset.zoomProduct);if(!prod)return;openPhotoZoom({photo:prod.photo,emoji:prod.emoji,title:prod.name,subtitle:`${prod.category||'Sin categoría'} · Stock: ${Number(prod.stock)||0}`,priceText:money(prod.price),productId:prod.id})}));
+      document.querySelectorAll('[data-copy-link]').forEach(btn=>btn.addEventListener('click',()=>{const link=catalogUrlFor();if(navigator.clipboard?.writeText)navigator.clipboard.writeText(link).then(()=>toast('Enlace del catálogo copiado')).catch(()=>toast('No se pudo copiar el enlace',true));else toast(link)}));
+      document.querySelectorAll('[data-preview-public]').forEach(btn=>btn.addEventListener('click',()=>{if(!cloud.storeId)return;cloud.publicViaLink=false;cloud.publicCategory='Todas';cloud.publicCart={};subscribePublicCatalog(cloud.storeId)}));
+      document.querySelectorAll('[data-gen-invite]').forEach(btn=>btn.addEventListener('click',()=>createInviteCode(btn.dataset.genInvite).catch(err=>toast(err.message||'No se pudo crear el código',true))));
+      document.querySelectorAll('[data-copy-invite]').forEach(btn=>btn.addEventListener('click',()=>{const code=btn.dataset.copyInvite;if(navigator.clipboard?.writeText)navigator.clipboard.writeText(code).then(()=>toast(`Código ${code} copiado`));else toast(code)}));
+      document.querySelectorAll('[data-revoke-invite]').forEach(btn=>btn.addEventListener('click',()=>revokeInviteCode(btn.dataset.revokeInvite).catch(err=>toast(err.message||'Error al revocar',true))));
+      document.querySelectorAll('[data-member-role]').forEach(btn=>btn.addEventListener('click',()=>setMemberRole(btn.dataset.memberRole,btn.dataset.nextRole).catch(err=>toast(err.message||'No se pudo cambiar rol',true))));
+      document.querySelectorAll('[data-member-remove]').forEach(btn=>btn.addEventListener('click',()=>removeMember(btn.dataset.memberRemove).catch(err=>toast(err.message||'No se pudo quitar miembro',true))));
+    }
     function drawCharts(){requestAnimationFrame(()=>{const canvas=document.getElementById('main-chart');if(!canvas)return;const rect=canvas.getBoundingClientRect();if(!rect.width||!rect.height)return;const ratio=window.devicePixelRatio||1;canvas.width=rect.width*ratio;canvas.height=rect.height*ratio;const c=canvas.getContext('2d');c.scale(ratio,ratio);const w=rect.width,h=rect.height;const n=period==='7'?7:period==='30'?6:period==='90'?6:8;const now=new Date();now.setHours(0,0,0,0);const earliest=[...state.sales.map(s=>s.date),...state.expenses.map(e=>e.date)].sort()[0];let range=period==='7'?7:period==='30'?30:period==='90'?90:360;if(period==='all'&&earliest){const start=new Date(earliest+'T00:00:00');range=Math.min(360,Math.max(30,Math.ceil((now-start)/86400000)+1))}const start=new Date(now);start.setDate(start.getDate()-range+1);const labels=Array.from({length:n},(_,i)=>{const d=new Date(start);d.setDate(d.getDate()+Math.floor(i*range/n));return new Intl.DateTimeFormat('es-MX',{day:'numeric',month:'short'}).format(d)});const sums=Array.from({length:n},()=>[0,0]);const addToBuckets=(items,slot)=>items.forEach(item=>{const d=new Date(item.date+'T00:00:00');const day=Math.floor((d-start)/86400000);if(day>=0&&day<range){const bucket=Math.min(n-1,Math.floor(day*n/range));sums[bucket][slot]+=Number(item.total??item.amount)||0}});addToBuckets(state.sales,0);addToBuckets(state.expenses,1);const max=Math.max(1,...sums.flat())*1.15;const fmtAxis=(v)=>v<=0?'0':v>=1000?`$${(v/1000).toFixed(v>=10000?0:1).replace(/\.0$/,'')}k`:money(v).replace(/\.00$/,'');c.font='10px system-ui';const yLabels=[0,1,2,3].map(i=>i===3?'0':fmtAxis(max*(1-i/3)));const leftPad=Math.max(36,Math.ceil(Math.max(...yLabels.map(t=>c.measureText(t).width)))+10);const pad={l:leftPad,r:8,t:10,b:26},iw=w-pad.l-pad.r,ih=h-pad.t-pad.b;for(let i=0;i<4;i++){const y=pad.t+ih*i/3;c.strokeStyle=i===3?'#dfe4dd':'#eef1ec';c.setLineDash(i===3?[]:[3,3]);c.lineWidth=1;c.beginPath();c.moveTo(pad.l,y);c.lineTo(w-pad.r,y);c.stroke();c.fillStyle='#8c978e';c.textAlign='right';c.fillText(yLabels[i],pad.l-6,y+3)}c.setLineDash([]);const gap=iw/n,bw=Math.max(7,Math.min(18,gap*.27));const drawBar=(x,y,bw,bh)=>{if(bh<=0)return;const r=Math.min(4,bh/2,bw/2);if(c.roundRect){c.beginPath();c.roundRect(x,y,bw,bh,[r,r,0,0]);c.fill()}else{c.fillRect(x,y,bw,bh)}};sums.forEach((pair,i)=>{const cx=pad.l+gap*i+gap/2;const hs=pair[0]>0?Math.max(3,pair[0]/max*ih):0,he=pair[1]>0?Math.max(3,pair[1]/max*ih):0;c.fillStyle='#cde95d';drawBar(cx-bw-1.5,pad.t+ih-hs,bw,hs);c.fillStyle='#edc99e';drawBar(cx+1.5,pad.t+ih-he,bw,he);c.textAlign='center';c.fillStyle='#849087';c.fillText(labels[i],cx,h-7)});c.textAlign='left'})}
     function showMoreMenu(){modal={type:'more'};render()}
-    function action(type){if(type==='settings'){modal={type:'settings'};render();return}if(type==='export'){exportData();return}if(type==='copy-catalog'){copyCatalog();return}if(type.startsWith('collect:')){openModal('collect',type.split(':')[1]);return}if(type.startsWith('receipt:')){showReceipt(type.split(':')[1]);return}if(type.startsWith('adjust:')){openModal('adjust',type.split(':')[1]);return}}
+    function action(type){
+      if(type==='auth'){modal={type:'auth'};render();return}
+      if(type==='account'){modal={type:'account'};render();return}
+      if(type==='onboarding'){cloud.onboardingForced=false;modal={type:'onboarding'};render();return}
+      if(type==='settings'){if(!isOwnerRole())return action('account');modal={type:'settings'};render();return}
+      if(type==='export'){exportData();return}
+      if(type==='copy-catalog'){copyCatalog();return}
+      if(type.startsWith('collect:')){openModal('collect',type.split(':')[1]);return}
+      if(type.startsWith('receipt:')){showReceipt(type.split(':')[1]);return}
+      if(type.startsWith('adjust:')){openModal('adjust',type.split(':')[1]);return}
+    }
     function openModal(type,id=null){
+      if(isSellerRole()&&(['expense','product','supplier'].includes(type)||(type==='sale'&&id))){
+        return toast('Solo el dueño puede hacer esta acción',true);
+      }
       if(type==='sale'){
         const previous=id?state.sales.find(s=>s.id===id):null;
         if(id&&!previous)return toast('No encontré la nota para editar',true);
         saleDraft=previous?getSaleItems(previous).map(item=>({productId:item.productId,product:item.product,qty:item.qty,unitPrice:item.unitPrice})):[];
         saleStep=id?'review':'pick';saleSearch='';saleCategory='Todas';returnToSale=null;
-        saleMeta={customer:previous?.customer||'',date:previous?.date||today(),seller:previous?.seller??state.settings.seller??'',payment:previous?.payment||'Efectivo',paid:previous?.paid??0};
+        const defaultSeller=isCloudActive()?(cloud.member?.name||cloud.user?.displayName||''):(state.settings.seller||'');
+        saleMeta={customer:previous?.customer||'',date:previous?.date||today(),seller:previous?.seller??defaultSeller,payment:previous?.payment||'Efectivo',paid:previous?.paid??0};
       }
       if(type==='product'){
         returnToSale=modal?.type==='sale'?{...modal,step:saleStep}:null;
         productPhotoDraft=null;productFormDraft=null;photoBusy=false;
       }
+      cloud.busy=false;
       modal={type,id};render()
     }
     function stopCameraStream(){if(cameraStream){cameraStream.getTracks().forEach(t=>t.stop());cameraStream=null}}
-    function closeModal(){stopCameraStream();clearModalDraft();productFormDraft=null;if(modal?.type==='product'&&returnToSale){saleStep=returnToSale.step;modal={type:'sale',id:returnToSale.id};returnToSale=null;productPhotoDraft=null;render();return}modal=null;saleDraft=[];returnToSale=null;productPhotoDraft=null;render()}
+    function closeModal(){
+      if(modal?.type==='onboarding'&&cloud.onboardingForced&&cloud.user&&!cloud.storeId){
+        toast('Crea tu negocio, únete con código o cierra sesión',true);return;
+      }
+      stopCameraStream();clearModalDraft();productFormDraft=null;
+      if(modal?.type==='product'&&returnToSale){saleStep=returnToSale.step;modal={type:'sale',id:returnToSale.id};returnToSale=null;productPhotoDraft=null;render();return}
+      modal=null;saleDraft=[];returnToSale=null;productPhotoDraft=null;cloud.busy=false;render()
+    }
     function toast(message,error=false){const old=document.querySelector('.toast');old?.remove();const el=document.createElement('div');el.className='toast'+(error?' error':'');el.textContent=message;document.body.appendChild(el);clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.remove(),2600)}
     const field=(label,name,type='text',value='',opts={})=>`<div class="field ${opts.full?'full':''}"><label for="${name}">${label}</label>${opts.options?`<select id="${name}" name="${name}">${opts.options.map(o=>`<option ${String(value)===String(o.value)?'selected':''} value="${esc(o.value)}">${esc(o.label)}</option>`).join('')}</select>`:type==='textarea'?`<textarea id="${name}" name="${name}" placeholder="${opts.placeholder||''}">${esc(value)}</textarea>`:`<input id="${name}" name="${name}" type="${type}" value="${esc(value)}" ${opts.min!=null?`min="${opts.min}"`:''} ${opts.step?`step="${opts.step}"`:''} ${opts.list?`list="${opts.list}"`:''} ${opts.placeholder?`placeholder="${opts.placeholder}"`:''} ${opts.required?'required':''} />`}</div>`;
     function modalFrame(title,desc,content,submit='Guardar'){return `<div class="modal-backdrop" id="modal-out"><section class="modal" role="dialog" aria-modal="true"><div class="modal-head"><div><h2 class="modal-title">${title}</h2><p class="modal-desc">${desc}</p></div><button class="modal-close" data-action="close" aria-label="Cerrar">×</button></div>${content}<div class="modal-actions"><button class="btn btn-light" data-action="close">Cancelar</button><button class="btn btn-primary" id="modal-submit">${submit}</button></div></section></div>`}
@@ -238,16 +784,40 @@
     function renderSaleProducts(){const q=saleSearch.trim().toLocaleLowerCase('es-MX');const matches=state.products.filter(p=>(saleCategory==='Todas'||p.category===saleCategory)&&(p.name+' '+(p.category||'')).toLocaleLowerCase('es-MX').includes(q)).sort((a,b)=>a.name.localeCompare(b.name,'es-MX'));if(!matches.length)return '<div class="empty">No encontré productos. Prueba otra búsqueda o agrega uno nuevo.</div>';return matches.map(p=>{const qty=selectedQty(p.id),avail=saleAvailable(p.id),remaining=avail-qty,isLow=avail>0&&avail<=Number(p.min||0),pillClass=avail<1?'out':isLow?'low':'';return `<div class="sale-product-card ${qty>0?'selected':''} ${avail<1?'sold-out':''}" data-sale-card="${esc(p.id)}"><button type="button" class="sale-photo" data-sale-tap="${esc(p.id)}" aria-label="Agregar 1 unidad de ${esc(p.name)}">${productArt(p)}</button><div class="sale-product-main"><button type="button" class="sale-card-tap" data-sale-tap="${esc(p.id)}" aria-label="Agregar 1 unidad de ${esc(p.name)}"><div class="sale-product-top"><div class="sale-product-name">${esc(p.name)}</div>${avail<=Number(p.min||0)?`<span class="sale-stock-warn" aria-hidden="true">!</span>`:''}</div><div class="sale-stock-pill ${pillClass}">${avail>0?`${avail} disponibles`:'Agotado'}</div></button><div class="sale-card-foot"><div class="sale-product-price">${money(p.price)}</div><div class="qty-stepper"><button type="button" data-sale-adjust="-1" data-id="${esc(p.id)}" aria-label="Quitar una unidad de ${esc(p.name)}" ${qty<1?'disabled':''}>−</button><strong>${qty}</strong><button type="button" data-sale-adjust="1" data-id="${esc(p.id)}" aria-label="Agregar una unidad de ${esc(p.name)}" ${remaining<1?'disabled':''}>+</button></div></div></div></div>`}).join('')}
     function saleTotal(){return Math.round(saleDraft.reduce((sum,item)=>sum+Math.max(0,Number(item.qty)||0)*Math.max(0,Number(item.unitPrice)||0),0)*100)/100}
     function captureSaleMeta(){for(const name of ['customer','date','seller','payment','paid']){const input=document.getElementById(name);if(input)saleMeta[name]=input.value}}
-    function renderModal(){if(modal.type==='more')return `<div class="modal-backdrop" id="modal-out"><section class="modal" role="dialog" aria-modal="true"><div class="modal-head"><div><h2 class="modal-title">Más secciones</h2><p class="modal-desc">Abre una sección de Notas</p></div><button class="modal-close" data-action="close">×</button></div><div class="nav">${navItems.filter(x=>!['inicio','ventas','inventario','reportes'].includes(x[0])).map(x=>navButton(x[0],x[1],x[2])).join('')}<button class="nav-btn" data-action="settings"><span class="nav-icon">${icon('settings')}</span><span>Configuración</span></button></div></section></div>`;
-      if(modal.type==='settings')return `<div class="modal-backdrop" id="modal-out"><section class="modal" role="dialog" aria-modal="true"><div class="modal-head"><div><h2 class="modal-title">Configuración</h2><p class="modal-desc">Datos que aparecerán en los comprobantes.</p></div><button class="modal-close" data-action="close">×</button></div><div class="business-settings"><label>Nombre del negocio<input id="business-name" value="${esc(state.settings.business)}" placeholder="Mi negocio" /></label><label>Dirección o ubicación<input id="business-address" value="${esc(state.settings.address)}" placeholder="Colonia, ciudad" /></label><label>Teléfono<input id="business-phone" type="tel" value="${esc(state.settings.phone)}" placeholder="Número de contacto" /></label><label>Correo electrónico<input id="business-email" type="email" value="${esc(state.settings.email)}" placeholder="correo@negocio.com" /></label><label>Registro o identificador comercial<input id="business-registration" value="${esc(state.settings.registration)}" placeholder="Opcional" /></label><label>Vendedor predeterminado<input id="business-seller" value="${esc(state.settings.seller)}" placeholder="Nombre del vendedor" /></label></div><div class="setting-block"><div class="setting-row"><div><div class="setting-label">Moneda</div><div class="setting-hint">Se usa para mostrar importes.</div></div><select id="currency"><option value="MXN" ${state.settings.currency==='MXN'?'selected':''}>MXN · Peso mexicano</option><option value="USD" ${state.settings.currency==='USD'?'selected':''}>USD · Dólar estadounidense</option><option value="COP" ${state.settings.currency==='COP'?'selected':''}>COP · Peso colombiano</option><option value="EUR" ${state.settings.currency==='EUR'?'selected':''}>EUR · Euro</option></select></div></div><div class="setting-block"><div class="setting-row"><div><div class="setting-label">Copia de seguridad</div><div class="setting-hint">Exporta o importa tus registros entre celular y PC.</div></div><div class="setting-actions"><button class="btn btn-light btn-sm" data-action="import">Importar</button><button class="btn btn-light btn-sm" data-action="export">${icon('export',14)} Exportar</button><input id="import-backup-file" type="file" accept=".json,application/json" hidden /></div></div></div><div class="setting-block"><div class="setting-row"><div><div class="setting-label">Actualizaciones</div><div class="setting-hint">Versión instalada: v${esc(APP_LOCAL_VERSION.webVersion||APP_LOCAL_VERSION.versionName)} (${esc(APP_LOCAL_VERSION.platform||'web')})</div></div><button class="btn btn-light btn-sm" data-action="${updateInfo?'apply-update':'check-update'}">${updateInfo?'Instalar v'+esc(updateInfo.webVersion||updateInfo.versionName):'Buscar actualización'}</button></div></div><div class="setting-block"><div class="setting-row"><div><div class="setting-label">Empezar de nuevo</div><div class="setting-hint">Restaura datos de demostración en este dispositivo.</div></div><button class="btn btn-danger btn-sm" data-action="reset">Restablecer</button></div></div><div class="modal-actions"><button class="btn btn-light" data-action="close">Cerrar</button><button class="btn btn-primary" data-action="save-settings">Guardar cambios</button></div></section></div>`;
-      if(modal.type==='receipt'){const s=state.sales.find(x=>x.id===modal.id);if(!s)return '';const items=getSaleItems(s),business=state.settings,paid=Number(s.paid)||0;return `<div class="modal-backdrop" id="modal-out"><section class="modal receipt-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><h2 class="modal-title">Comprobante de venta</h2><p class="modal-desc">Vista previa de la nota que compartirás</p></div><button class="modal-close" data-action="close">×</button></div><article class="invoice-paper"><header class="invoice-business"><h2>${esc(business.business||'Mi negocio')}</h2>${business.address?`<div>${esc(business.address)}</div>`:''}<div class="invoice-contact">${business.phone?`<span>☎ ${esc(business.phone)}</span>`:''}${business.email?`<span>✉ ${esc(business.email)}</span>`:''}${business.registration?`<span>⌂ ${esc(business.registration)}</span>`:''}</div></header><div class="invoice-divider"></div><section class="invoice-meta"><div><span>Fecha</span><strong>${esc(invoiceDate(s))}</strong></div><div><span>Vendedor</span><strong>${esc(s.seller||business.seller||'—')}</strong></div><div><span>Método de pago</span><strong>${esc(s.payment==='Pendiente'?'Por definir':s.payment||'—')}</strong></div><div><span>Estado</span><strong class="${pending(s)>0?'invoice-pending':''}">${pending(s)>0?'Pendiente':'Pagada'}</strong></div><div><span>Número de transacción</span><strong>${esc(s.folio||'0001')}</strong></div>${s.customer?`<div><span>Cliente</span><strong>${esc(s.customer)}</strong></div>`:''}</section><div class="invoice-table-wrap"><table class="invoice-table"><colgroup><col style="width:43%"><col style="width:14%"><col style="width:21%"><col style="width:22%"></colgroup><thead><tr><th>Productos</th><th>Cantidad</th><th>Precio unitario</th><th>Valor</th></tr></thead><tbody>${items.map(item=>`<tr><td>${esc(item.product)}</td><td>${item.qty}</td><td>${money(item.unitPrice)}</td><td>${money(item.total)}</td></tr>`).join('')}</tbody></table></div><div class="invoice-total"><span>Total:</span><strong>${money(s.total)}</strong></div>${pending(s)>0?`<div class="invoice-balance"><span>Pagado ${money(paid)}</span><strong>Saldo pendiente ${money(pending(s))}</strong></div>`:''}</article><div class="modal-actions invoice-actions"><button class="btn btn-light" data-action="close">Cerrar</button><button class="btn btn-light" data-edit="sale" data-id="${s.id}">Editar nota</button><button class="btn btn-light" data-action="share-receipt:${s.id}">Compartir como imagen</button><button class="btn btn-primary" data-action="print">Imprimir / Guardar PDF</button></div></section></div>`}
+    function renderModal(){
+      if(modal.type==='more'){
+        const bottomIds=isSellerRole()?['inicio','ventas','inventario','catalogo']:['inicio','ventas','inventario','reportes'];
+        const moreItems=visibleNavItems().filter(x=>!bottomIds.includes(x[0]));
+        return `<div class="modal-backdrop" id="modal-out"><section class="modal" role="dialog" aria-modal="true"><div class="modal-head"><div><h2 class="modal-title">Más secciones</h2><p class="modal-desc">Abre una sección de Notas</p></div><button class="modal-close" data-action="close">×</button></div><div class="nav">${moreItems.map(x=>navButton(x[0],x[1],x[2])).join('')}<button class="nav-btn" data-action="${cloud.user?'account':'auth'}"><span class="nav-icon">${icon('cloud')}</span><span>${cloud.user?'Mi cuenta y rol':'Conectar nube'}</span></button>${isOwnerRole()?`<button class="nav-btn" data-action="settings"><span class="nav-icon">${icon('settings')}</span><span>Configuración</span></button>`:''}</div></section></div>`;
+      }
+      if(modal.type==='auth'){
+        const isReg=cloud.authMode==='register';
+        return `<div class="modal-backdrop" id="modal-out"><section class="modal" role="dialog" aria-modal="true"><div class="modal-head"><div><h2 class="modal-title">${isReg?'Crear cuenta en la nube':'Iniciar sesión'}</h2><p class="modal-desc">Sincroniza inventario, ventas y roles en tiempo real entre dispositivos.</p></div><button class="modal-close" data-action="close">×</button></div><div class="auth-tabs" role="tablist"><button type="button" class="auth-tab ${!isReg?'active':''}" data-auth-mode="login">Iniciar sesión</button><button type="button" class="auth-tab ${isReg?'active':''}" data-auth-mode="register">Crear cuenta</button></div><form id="auth-form" class="form-grid">${isReg?field('Tu nombre','auth-name','text','',{full:true,required:true,placeholder:'Ej. Iván o Nombre del vendedor'}):''}${field('Correo electrónico','auth-email','email','',{full:true,required:true,placeholder:'tu@correo.com'})}${field('Contraseña','auth-pass','password','',{full:true,required:true,placeholder:isReg?'Mínimo 6 caracteres':'Tu contraseña'})}${isReg?field('Código de invitación (opcional si te invitaron)','auth-invite','text','',{full:true,placeholder:'Ej. NT7K4P9M (déjalo vacío si eres dueño)'}):''}<div class="field full auth-error" id="auth-error" hidden></div><div class="field full"><div class="modal-actions" style="margin-top:4px"><button type="button" class="btn btn-light" data-action="close">Cancelar</button><button type="submit" class="btn btn-primary" id="auth-submit">${isReg?'Crear cuenta':'Entrar'}</button></div></div></form><div class="setting-block"><div class="setting-row"><div><div class="setting-label">¿Eres comprador?</div><div class="setting-hint">No necesitas iniciar sesión. Abre un catálogo con su código de tienda.</div></div></div><div class="invite-gen-row" style="margin-top:10px;margin-bottom:0"><input id="auth-catalog-code" placeholder="Código de tienda (ej. n123...)" aria-label="Código de tienda" /><button type="button" class="btn btn-light btn-sm" id="auth-open-catalog">Ver catálogo</button></div></div></section></div>`;
+      }
+      if(modal.type==='onboarding'){
+        if(!cloud.user){modal={type:'auth'};return renderModal()}
+        const isJoin=cloud.onboardMode==='join';
+        const prodCount=state.products.length;
+        return `<div class="modal-backdrop" id="modal-out"><section class="modal" role="dialog" aria-modal="true"><div class="modal-head"><div><h2 class="modal-title">${isJoin?'Unirme a un negocio':'Crear mi negocio'}</h2><p class="modal-desc">Sesión: ${esc(cloud.user.email)}</p></div>${cloud.onboardingForced?'':`<button class="modal-close" data-action="close">×</button>`}</div><div class="auth-tabs" role="tablist"><button type="button" class="auth-tab ${!isJoin?'active':''}" data-ob-mode="create">Crear negocio (Dueño)</button><button type="button" class="auth-tab ${isJoin?'active':''}" data-ob-mode="join">Tengo un código</button></div><form id="onboarding-form" class="form-grid">${!isJoin?`${field('Nombre del negocio','ob-business','text',state.settings.business||'Mi negocio',{full:true,required:true,placeholder:'Ej. Abarrotes Lupita'})}${field('Tu nombre (Dueño)','ob-owner-name','text',cloud.user.displayName||state.settings.seller||'',{full:true,required:true,placeholder:'Cómo aparecerás en notas y equipo'})}<label class="field full ob-check"><input type="checkbox" id="ob-migrate" ${prodCount?'checked':''} /><span>Subir mis datos actuales de este dispositivo (${prodCount} producto(s), ventas y clientes)</span></label>`:`${field('Código de invitación','ob-code','text','',{full:true,required:true,placeholder:'Ej. NT7K4P9M'})}${field('Tu nombre','ob-member-name','text',cloud.user.displayName||'',{full:true,required:true,placeholder:'Cómo aparecerás al vender'})}<div class="field full"><div class="field-help">El código que te compartió el dueño define automáticamente si entras como Dueño (socio) o Vendedor.</div></div>`}<div class="field full auth-error" id="ob-error" hidden></div><div class="field full"><div class="modal-actions" style="margin-top:4px">${cloud.onboardingForced?`<button type="button" class="btn btn-light" id="ob-signout">Cerrar sesión</button>`:`<button type="button" class="btn btn-light" data-action="close">Cancelar</button>`}<button type="submit" class="btn btn-primary" id="ob-submit">${isJoin?'Unirme ahora':'Crear negocio'}</button></div></div></form></section></div>`;
+      }
+      if(modal.type==='account'){
+        if(!cloud.user){modal={type:'auth'};return renderModal()}
+        const storeIds=Array.isArray(cloud.profile?.storeIds)?cloud.profile.storeIds:[];
+        const switchBlock=storeIds.length>1?`<div class="setting-block"><div class="setting-row"><div><div class="setting-label">Cambiar de tienda</div><div class="setting-hint">Selecciona otro negocio vinculado a tu cuenta.</div></div><select id="account-store-select">${storeIds.map(sid=>`<option value="${esc(sid)}" ${sid===cloud.storeId?'selected':''}>${esc(sid===cloud.storeId?(state.settings.business||sid):sid)}</option>`).join('')}</select></div></div>`:'';
+        return `<div class="modal-backdrop" id="modal-out"><section class="modal" role="dialog" aria-modal="true"><div class="modal-head"><div><h2 class="modal-title">Mi cuenta</h2><p class="modal-desc">${esc(cloud.user.email)} · ${esc(cloudRoleLabel())}</p></div><button class="modal-close" data-action="close">×</button></div><div class="setting-block"><div class="setting-row"><div><div class="setting-label">${esc(state.settings.business||'Sin negocio activo')}</div><div class="setting-hint">Rol actual: <span class="role-pill ${esc(cloud.role||'')}">${esc(cloudRoleLabel())}</span></div></div><button type="button" class="btn btn-light btn-sm" data-action="onboarding">Crear o unirme</button></div></div>${switchBlock}${cloud.storeId?`<div class="setting-block"><div class="setting-row"><div><div class="setting-label">Link de catálogo público</div><div class="setting-hint">Tus clientes ven productos disponibles sin iniciar sesión.</div></div><button type="button" class="btn btn-light btn-sm" data-copy-link>Copiar link</button></div></div>`:''}<div class="setting-block"><div class="setting-row"><div><div class="setting-label">Actualizaciones</div><div class="setting-hint">Versión instalada: v${esc(APP_LOCAL_VERSION.webVersion||APP_LOCAL_VERSION.versionName)} (${esc(APP_LOCAL_VERSION.platform||'web')})</div></div><button class="btn btn-light btn-sm" data-action="${updateInfo?'apply-update':'check-update'}">${updateInfo?'Instalar v'+esc(updateInfo.webVersion||updateInfo.versionName):'Buscar actualización'}</button></div></div><div class="modal-actions"><button type="button" class="btn btn-danger" id="account-signout">Cerrar sesión</button><button type="button" class="btn btn-primary" data-action="close">Cerrar</button></div></section></div>`;
+      }
+      if(modal.type==='settings'){
+        if(!isOwnerRole()){modal={type:'account'};return renderModal()}
+        return `<div class="modal-backdrop" id="modal-out"><section class="modal" role="dialog" aria-modal="true"><div class="modal-head"><div><h2 class="modal-title">Configuración</h2><p class="modal-desc">Datos que aparecerán en los comprobantes.</p></div><button class="modal-close" data-action="close">×</button></div><div class="business-settings"><label>Nombre del negocio<input id="business-name" value="${esc(state.settings.business)}" placeholder="Mi negocio" /></label><label>Dirección o ubicación<input id="business-address" value="${esc(state.settings.address)}" placeholder="Colonia, ciudad" /></label><label>Teléfono<input id="business-phone" type="tel" value="${esc(state.settings.phone)}" placeholder="Número de contacto" /></label><label>Correo electrónico<input id="business-email" type="email" value="${esc(state.settings.email)}" placeholder="correo@negocio.com" /></label><label>Registro o identificador comercial<input id="business-registration" value="${esc(state.settings.registration)}" placeholder="Opcional" /></label><label>Vendedor predeterminado<input id="business-seller" value="${esc(state.settings.seller)}" placeholder="Nombre del vendedor" /></label></div><div class="setting-block"><div class="setting-row"><div><div class="setting-label">Moneda</div><div class="setting-hint">Se usa para mostrar importes.</div></div><select id="currency"><option value="MXN" ${state.settings.currency==='MXN'?'selected':''}>MXN · Peso mexicano</option><option value="USD" ${state.settings.currency==='USD'?'selected':''}>USD · Dólar estadounidense</option><option value="COP" ${state.settings.currency==='COP'?'selected':''}>COP · Peso colombiano</option><option value="EUR" ${state.settings.currency==='EUR'?'selected':''}>EUR · Euro</option></select></div></div><div class="setting-block"><div class="setting-row"><div><div class="setting-label">Copia de seguridad</div><div class="setting-hint">Exporta o importa tus registros entre celular y PC.</div></div><div class="setting-actions"><button class="btn btn-light btn-sm" data-action="import">Importar</button><button class="btn btn-light btn-sm" data-action="export">${icon('export',14)} Exportar</button><input id="import-backup-file" type="file" accept=".json,application/json" hidden /></div></div></div><div class="setting-block"><div class="setting-row"><div><div class="setting-label">Actualizaciones</div><div class="setting-hint">Versión instalada: v${esc(APP_LOCAL_VERSION.webVersion||APP_LOCAL_VERSION.versionName)} (${esc(APP_LOCAL_VERSION.platform||'web')})</div></div><button class="btn btn-light btn-sm" data-action="${updateInfo?'apply-update':'check-update'}">${updateInfo?'Instalar v'+esc(updateInfo.webVersion||updateInfo.versionName):'Buscar actualización'}</button></div></div>${isCloudActive()?'':`<div class="setting-block"><div class="setting-row"><div><div class="setting-label">Empezar de nuevo</div><div class="setting-hint">Restaura datos de demostración en este dispositivo.</div></div><button class="btn btn-danger btn-sm" data-action="reset">Restablecer</button></div></div>`}<div class="modal-actions"><button class="btn btn-light" data-action="close">Cerrar</button><button class="btn btn-primary" data-action="save-settings">Guardar cambios</button></div></section></div>`;
+      }
+      if(modal.type==='receipt'){const s=state.sales.find(x=>x.id===modal.id);if(!s)return '';const items=getSaleItems(s),business=state.settings,paid=Number(s.paid)||0;return `<div class="modal-backdrop" id="modal-out"><section class="modal receipt-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><h2 class="modal-title">Comprobante de venta</h2><p class="modal-desc">Vista previa de la nota que compartirás</p></div><button class="modal-close" data-action="close">×</button></div><article class="invoice-paper"><header class="invoice-business"><h2>${esc(business.business||'Mi negocio')}</h2>${business.address?`<div>${esc(business.address)}</div>`:''}<div class="invoice-contact">${business.phone?`<span>☎ ${esc(business.phone)}</span>`:''}${business.email?`<span>✉ ${esc(business.email)}</span>`:''}${business.registration?`<span>⌂ ${esc(business.registration)}</span>`:''}</div></header><div class="invoice-divider"></div><section class="invoice-meta"><div><span>Fecha</span><strong>${esc(invoiceDate(s))}</strong></div><div><span>Vendedor</span><strong>${esc(s.seller||business.seller||'—')}</strong></div><div><span>Método de pago</span><strong>${esc(s.payment==='Pendiente'?'Por definir':s.payment||'—')}</strong></div><div><span>Estado</span><strong class="${pending(s)>0?'invoice-pending':''}">${pending(s)>0?'Pendiente':'Pagada'}</strong></div><div><span>Número de transacción</span><strong>${esc(s.folio||'0001')}</strong></div>${s.customer?`<div><span>Cliente</span><strong>${esc(s.customer)}</strong></div>`:''}</section><div class="invoice-table-wrap"><table class="invoice-table"><colgroup><col style="width:43%"><col style="width:14%"><col style="width:21%"><col style="width:22%"></colgroup><thead><tr><th>Productos</th><th>Cantidad</th><th>Precio unitario</th><th>Valor</th></tr></thead><tbody>${items.map(item=>`<tr><td>${esc(item.product)}</td><td>${item.qty}</td><td>${money(item.unitPrice)}</td><td>${money(item.total)}</td></tr>`).join('')}</tbody></table></div><div class="invoice-total"><span>Total:</span><strong>${money(s.total)}</strong></div>${pending(s)>0?`<div class="invoice-balance"><span>Pagado ${money(paid)}</span><strong>Saldo pendiente ${money(pending(s))}</strong></div>`:''}</article><div class="modal-actions invoice-actions"><button class="btn btn-light" data-action="close">Cerrar</button>${isOwnerRole()?`<button class="btn btn-light" data-edit="sale" data-id="${s.id}">Editar nota</button>`:''}<button class="btn btn-light" data-action="share-receipt:${s.id}">Compartir como imagen</button><button class="btn btn-primary" data-action="print">Imprimir / Guardar PDF</button></div></section></div>`}
       if(modal.type==='sale'){
         const s=modal.id?state.sales.find(x=>x.id===modal.id):null;
         if(modal.id&&!s)return '';
         const customers=[{value:'',label:'Venta de mostrador'},...state.customers.map(c=>({value:c.name,label:c.name}))];
         if(saleMeta.customer&&!customers.some(c=>c.value===saleMeta.customer))customers.push({value:saleMeta.customer,label:saleMeta.customer});
         const categories=['Todas',...new Set(state.products.map(p=>p.category||'Productos'))].sort((a,b)=>a==='Todas'?-1:b==='Todas'?1:a.localeCompare(b,'es-MX'));
-        const picker=`<div class="sale-search-row"><div class="sale-search-wrap"><input class="sale-search" id="product-search" type="search" autocomplete="off" placeholder="Buscar producto…" aria-label="Buscar productos" value="${esc(saleSearch)}" /><button type="button" class="sale-search-clear" data-sale-clear-search aria-label="Limpiar búsqueda" ${saleSearch?'':'hidden'}>×</button></div><button type="button" class="sale-new-compact" data-open="product">＋ Nuevo</button></div><div class="sale-categories" role="tablist" aria-label="Categorías">${categories.map(c=>`<button type="button" class="sale-chip ${c===saleCategory?'active':''}" data-sale-cat="${esc(c)}">${esc(c)}</button>`).join('')}</div><div id="sale-product-results" class="sale-products">${renderSaleProducts()}</div>`;
+        const picker=`<div class="sale-search-row"><div class="sale-search-wrap"><input class="sale-search" id="product-search" type="search" autocomplete="off" placeholder="Buscar producto…" aria-label="Buscar productos" value="${esc(saleSearch)}" /><button type="button" class="sale-search-clear" data-sale-clear-search aria-label="Limpiar búsqueda" ${saleSearch?'':'hidden'}>×</button></div>${isOwnerRole()?`<button type="button" class="sale-new-compact" data-open="product">＋ Nuevo</button>`:''}</div><div class="sale-categories" role="tablist" aria-label="Categorías">${categories.map(c=>`<button type="button" class="sale-chip ${c===saleCategory?'active':''}" data-sale-cat="${esc(c)}">${esc(c)}</button>`).join('')}</div><div id="sale-product-results" class="sale-products">${renderSaleProducts()}</div>`;
         const showPaid=s||saleMeta.payment==='Pendiente';
         const payBlock=`<div class="sale-pay-block"><span class="sale-pay-label">Forma de pago</span><input type="hidden" id="payment" name="payment" value="${esc(saleMeta.payment)}" /><div class="sale-pay-pills" role="group" aria-label="Forma de pago">${['Efectivo','Tarjeta','Transferencia','Pendiente'].map(v=>`<button type="button" class="sale-pay-pill ${saleMeta.payment===v?'active':''}" data-pay-method="${v}">${v}</button>`).join('')}</div></div>${showPaid?`<div class="sale-paid-row">${field(s?'Importe ya pagado':'Abono inicial (opcional)','paid','number',saleMeta.paid??0,{min:0,step:'0.01',placeholder:'0',required:Boolean(s)})}<div class="sale-paid-meta"><span class="sale-paid-badge" id="sale-paid-badge"></span>${s?`<button type="button" class="btn btn-light btn-sm" data-pay-full>Liquidar total</button>`:''}</div></div>`:''}`;
         const review=`<div class="sale-review-head"><h3>Productos seleccionados</h3><button type="button" class="btn btn-light btn-sm" data-sale-step="pick">＋ Agregar productos</button></div><div id="sale-draft-list" class="sale-draft-list"></div><form id="modal-form" class="sale-review-form">${payBlock}${field('Cliente (opcional)','customer','text',saleMeta.customer,{options:customers})}${field('Fecha','date','date',saleMeta.date,{required:true})}${field('Vendedor/a','seller','text',saleMeta.seller,{placeholder:'Nombre del vendedor',full:true})}</form>`;
@@ -258,7 +828,7 @@
       if(modal.type==='product'){const p=state.products.find(x=>x.id===modal.id)||{};const f=productFormDraft||{};const photo=productPhotoDraft===null?p.photo:productPhotoDraft;const cats=[...new Set(state.products.map(x=>x.category||'Productos'))].sort((a,b)=>a.localeCompare(b,'es-MX'));return modalFrame(modal.id?'Editar producto':'Agregar producto','Configura precio, costo y alerta de stock mínimo.',`<form id="modal-form" class="form-grid"><div class="photo-edit"><button type="button" class="photo-preview photo-zoom-trigger" id="photo-preview" title="Ver imagen grande" aria-label="Agrandar vista previa">${productArt({...p,photo})}</button><div class="photo-controls"><strong>Foto del producto</strong><div class="photo-btn-row"><button type="button" class="btn btn-light btn-sm" id="product-camera-btn">${icon('camera',15)} Tomar foto</button><label for="product-photo" class="btn btn-light btn-sm" id="product-gallery-lbl">${icon('image',15)} Galería</label><input id="product-camera" type="file" accept="image/*" capture="environment" hidden aria-label="Tomar foto con cámara" /><input id="product-photo" type="file" accept="image/*" hidden aria-label="Elegir foto de la galería" /><button type="button" class="photo-remove" id="photo-remove" ${photo?'':'hidden'}>Quitar</button></div><small>Toca la imagen para verla grande.</small></div></div><div class="camera-live-box" id="camera-live-box" hidden><video class="camera-live-video" id="camera-live-video" autoplay playsinline muted></video><div class="camera-live-actions"><button type="button" class="btn btn-light btn-sm" id="camera-live-cancel">Cancelar</button><button type="button" class="btn btn-lime btn-sm" id="camera-live-snap">${icon('camera',15)} Capturar</button></div></div>${field('Nombre','name','text',f.name??p.name??'',{full:true,required:true,placeholder:'Ej. Café americano'})}${field('Categoría','category','text',(f.category??p.category)||'Productos',{list:'product-categories',placeholder:'Productos'})}<datalist id="product-categories">${cats.map(c=>`<option value="${esc(c)}"></option>`).join('')}</datalist>${field('Emoji si no hay foto','emoji','text',(f.emoji??p.emoji)||'📦',{placeholder:'📦'})}${field('Precio de venta','price','number',f.price??p.price??'',{min:0,step:'0.01',required:true})}${field('Costo unitario','cost','number',f.cost??p.cost??0,{min:0,step:'0.01'})}<div class="field-live-hint" id="product-margin-hint"></div>${field('Existencias actuales','stock','number',f.stock??p.stock??0,{min:0,step:1})}${field('Avisar al llegar a','min','number',f.min??p.min??3,{min:0,step:1})}</form>`,modal.id?'Guardar cambios':'Guardar producto')}
       if(modal.type==='customer'||modal.type==='supplier'){const customer=modal.type==='customer',list=customer?state.customers:state.suppliers,x=list.find(a=>a.id===modal.id)||{};return modalFrame(modal.id?'Editar contacto':customer?'Agregar cliente':'Agregar proveedor','Guarda los datos para encontrarlos fácilmente después.',`<form id="modal-form" class="form-grid">${field('Nombre','name','text',x.name||'',{full:true,required:true})}${field('Teléfono','phone','tel',x.phone||'')}${customer?'':field('Correo','email','email',x.email||'')}${field('Notas','notes','textarea',x.notes||'',{full:true,placeholder:'Información útil sobre este contacto'})}</form>`,customer?'Guardar cliente':'Guardar proveedor')}
       if(modal.type==='collect'){const s=state.sales.find(x=>x.id===modal.id);if(!s)return '';return modalFrame('Registrar abono',`${s.customer||'Cliente'} · saldo actual ${money(pending(s))}`,`<form id="modal-form" class="form-grid">${field('Importe recibido','amount','number','',{min:.01,step:'0.01',required:true})}${field('Fecha','date','date',today(),{required:true})}<div class="field"><label for="payment">Forma de pago</label><select id="payment" name="payment"><option>Efectivo</option><option>Tarjeta</option><option>Transferencia</option><option>Otro</option></select></div></form>`,'Guardar abono')}
-      if(modal.type==='adjust'){const p=getProduct(modal.id);if(!p)return '';return modalFrame('Ajustar existencias',`${esc(p.name)} · tienes ${p.stock} unidad(es)`, `<form id="modal-form" class="form-grid"><input type="hidden" id="movement" name="movement" value="add" /><div class="adjust-modes" role="group" aria-label="Tipo de ajuste"><button type="button" class="adjust-mode active" data-adjust-mode="add">+ Sumar</button><button type="button" class="adjust-mode" data-adjust-mode="remove">− Restar</button><button type="button" class="adjust-mode" data-adjust-mode="set">= Fijar total</button></div>${field('Cantidad','amount','number',1,{min:0,step:1,required:true,full:true})}<div class="adjust-quick">${[1,5,10,25].map(n=>`<button type="button" class="adjust-chip" data-adjust-val="${n}">${n}</button>`).join('')}</div><div class="adjust-preview" id="adjust-preview" data-current-stock="${Number(p.stock)||0}"><span>Stock actual: ${p.stock}</span><strong>Nuevo: ${(Number(p.stock)||0)+1}</strong></div><div class="field full"><div class="field-help">Si es una compra nueva y quieres llevar control del gasto, regístrala también en Gastos.</div></div></form>`,'Actualizar stock')}
+      if(modal.type==='adjust'){const p=getProduct(modal.id);if(!p)return '';return modalFrame('Ajustar existencias',`${esc(p.name)} · tienes ${p.stock} unidad(es)`, `<form id="modal-form" class="form-grid"><input type="hidden" id="movement" name="movement" value="add" /><div class="adjust-modes" role="group" aria-label="Tipo de ajuste"><button type="button" class="adjust-mode active" data-adjust-mode="add">+ Sumar</button><button type="button" class="adjust-mode" data-adjust-mode="remove">− Restar</button><button type="button" class="adjust-mode" data-adjust-mode="set">= Fijar total</button></div>${field('Cantidad','amount','number',1,{min:0,step:1,required:true,full:true})}<div class="adjust-quick">${[1,5,10,25].map(n=>`<button type="button" class="adjust-chip" data-adjust-val="${n}">${n}</button>`).join('')}</div><div class="adjust-preview" id="adjust-preview" data-current-stock="${Number(p.stock)||0}"><span>Stock actual: ${p.stock}</span><strong>Nuevo: ${(Number(p.stock)||0)+1}</strong></div>${isSellerRole()?'':`<div class="field full"><div class="field-help">Si es una compra nueva y quieres llevar control del gasto, regístrala también en Gastos.</div></div>`}</form>`,'Actualizar stock')}
       return ''}
     function bindModal(){
       const backdrop=document.getElementById('modal-out');backdrop?.addEventListener('click',e=>{if(e.target===backdrop)closeModal()});
@@ -329,6 +899,97 @@
       document.getElementById('paid')?.addEventListener('input',updateTotal);
       const importInput=document.getElementById('import-backup-file');
       importInput?.addEventListener('change',()=>{const file=importInput.files?.[0];if(file)importData(file);importInput.value=''});
+      document.querySelectorAll('[data-auth-mode]').forEach(btn=>btn.addEventListener('click',()=>{cloud.authMode=btn.dataset.authMode;render()}));
+      document.querySelectorAll('[data-ob-mode]').forEach(btn=>btn.addEventListener('click',()=>{cloud.onboardMode=btn.dataset.obMode;render()}));
+      document.querySelectorAll('.modal [data-copy-link]').forEach(btn=>btn.addEventListener('click',()=>{const link=catalogUrlFor();if(navigator.clipboard?.writeText)navigator.clipboard.writeText(link).then(()=>toast('Enlace del catálogo copiado')).catch(()=>toast(link));else toast(link)}));
+      document.getElementById('auth-open-catalog')?.addEventListener('click',()=>{
+        const raw=document.getElementById('auth-catalog-code')?.value?.trim()||'';
+        const m=raw.match(/catalogo=([a-zA-Z0-9_-]+)/);
+        const sid=(m?m[1]:raw).trim();
+        if(!sid)return toast('Escribe el código o pega el link del catálogo',true);
+        modal=null;cloud.publicViaLink=false;cloud.publicCategory='Todas';cloud.publicCart={};
+        subscribePublicCatalog(sid);
+      });
+      const authForm=document.getElementById('auth-form');
+      if(authForm)authForm.addEventListener('submit',async e=>{
+        e.preventDefault();
+        if(cloud.busy)return;
+        const errBox=document.getElementById('auth-error'),subBtn=document.getElementById('auth-submit');
+        const showErr=(msg)=>{if(errBox){errBox.textContent=msg;errBox.hidden=false}else toast(msg,true)};
+        if(errBox)errBox.hidden=true;
+        const email=(document.getElementById('auth-email')?.value||'').trim();
+        const pass=document.getElementById('auth-pass')?.value||'';
+        const name=(document.getElementById('auth-name')?.value||'').trim();
+        const invite=(document.getElementById('auth-invite')?.value||'').trim().toUpperCase();
+        if(!email||!pass)return showErr('Completa tu correo y contraseña.');
+        cloud.busy=true;if(subBtn){subBtn.disabled=true;subBtn.textContent='Conectando…'}
+        try{
+          if(!(await ensureFirebase()))throw new Error(cloud.sdkError||'No se pudo conectar con Firebase');
+          if(cloud.authMode==='register'){
+            const cred=await cloud.fb.createUserWithEmailAndPassword(cloud.auth,email,pass);
+            if(name){await cloud.fb.updateProfile(cred.user,{displayName:name}).catch(()=>{})}
+            cloud.user={uid:cred.user.uid,email:cred.user.email||email,displayName:name||''};
+            if(invite){
+              try{
+                await joinCloudWithInvite({code:invite,memberName:name});
+                modal=null;render();toast('Cuenta creada y unida al negocio');
+              }catch(joinErr){
+                cloud.onboardMode='join';
+                toast(joinErr.message||'Cuenta creada, revisa el código de invitación',true);
+              }
+              return;
+            }
+            toast('Cuenta creada · configura tu negocio');
+          }else{
+            await cloud.fb.signInWithEmailAndPassword(cloud.auth,email,pass);
+            modal=null;render();toast('Sesión iniciada');
+          }
+        }catch(err){
+          showErr(translateAuthError(err));
+        }finally{
+          cloud.busy=false;
+          if(subBtn&&document.body.contains(subBtn)){subBtn.disabled=false;subBtn.textContent=cloud.authMode==='register'?'Crear cuenta':'Entrar'}
+        }
+      });
+      const obForm=document.getElementById('onboarding-form');
+      if(obForm)obForm.addEventListener('submit',async e=>{
+        e.preventDefault();
+        if(cloud.busy)return;
+        const errBox=document.getElementById('ob-error'),subBtn=document.getElementById('ob-submit');
+        const showErr=(msg)=>{if(errBox){errBox.textContent=msg;errBox.hidden=false}else toast(msg,true)};
+        if(errBox)errBox.hidden=true;
+        cloud.busy=true;if(subBtn){subBtn.disabled=true;subBtn.textContent='Guardando…'}
+        try{
+          if(cloud.onboardMode==='join'){
+            const code=document.getElementById('ob-code')?.value||'';
+            const memberName=document.getElementById('ob-member-name')?.value||'';
+            await joinCloudWithInvite({code,memberName});
+            modal=null;page='inicio';render();toast('Te uniste al equipo correctamente');
+          }else{
+            const business=document.getElementById('ob-business')?.value||'';
+            const ownerName=document.getElementById('ob-owner-name')?.value||'';
+            const migrateLocal=Boolean(document.getElementById('ob-migrate')?.checked);
+            await createCloudStore({business,ownerName,migrateLocal});
+            modal=null;page='inicio';render();toast('Negocio creado y sincronizado en la nube');
+          }
+        }catch(err){
+          showErr(translateAuthError(err));
+        }finally{
+          cloud.busy=false;
+          if(subBtn&&document.body.contains(subBtn)){subBtn.disabled=false;subBtn.textContent=cloud.onboardMode==='join'?'Unirme ahora':'Crear negocio'}
+        }
+      });
+      const doSignOut=async()=>{try{await cloud.fb?.signOut?.(cloud.auth);modal=null;render();toast('Sesión cerrada')}catch{toast('No se pudo cerrar sesión',true)}};
+      document.getElementById('ob-signout')?.addEventListener('click',doSignOut);
+      document.getElementById('account-signout')?.addEventListener('click',doSignOut);
+      document.getElementById('account-store-select')?.addEventListener('change',async e=>{
+        const sid=e.target.value;if(!sid||sid===cloud.storeId)return;
+        try{
+          const{doc,setDoc}=cloud.fb;
+          if(cloud.profile){cloud.profile.activeStoreId=sid;cloud.profile.updatedAt=Date.now();await setDoc(doc(cloud.db,'users',cloud.user.uid),cloud.profile,{merge:true})}
+          await attachStoreCloud(sid);modal=null;render();toast('Tienda cambiada');
+        }catch{toast('No se pudo cambiar de tienda',true)}
+      });
       renderSaleDraft()
     }
     function escModal(e){if(e.key==='Escape'&&modal)closeModal()}
@@ -368,34 +1029,57 @@
         const pay=v.payment,rawPaid=v.paid!==undefined&&v.paid!==''?Number(v.paid):0,paid=previous?Number(v.paid):pay==='Pendiente'?rawPaid:total;
         if(!Number.isFinite(paid)||paid<0||paid>total)return toast('El importe pagado debe estar entre cero y el total de la nota',true);
         const now=new Date(),folio=previous?.folio||String(state.saleSequence||1).padStart(4,'0');
-        const sale={...previous,id:previous?.id||uid(),folio,date:v.date,time:previous?previous.time||'':now.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}),seller:(v.seller||'').trim(),items,product:items.length===1?items[0].product:`${items.length} productos`,productId:items.length===1?items[0].productId:'',qty:items.reduce((sum,item)=>sum+item.qty,0),unitPrice:items.length===1?items[0].unitPrice:0,total,customer:(v.customer||'').trim(),payment:pay,paid};
+        if(previous&&isSellerRole())return toast('Solo el dueño puede editar notas guardadas',true);
+        const sale={...previous,id:previous?.id||uid(),folio,date:v.date,time:previous?previous.time||'':now.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}),seller:(v.seller||'').trim(),sellerUid:previous?.sellerUid||(cloud.user?.uid||''),items,product:items.length===1?items[0].product:`${items.length} productos`,productId:items.length===1?items[0].productId:'',qty:items.reduce((sum,item)=>sum+item.qty,0),unitPrice:items.length===1?items[0].unitPrice:0,total,customer:(v.customer||'').trim(),payment:pay,paid};
+        const stockChanges=[];
         for(const productId of new Set([...originalQty.keys(),...newQty.keys()])){
           const p=getProduct(productId);
-          if(p)p.stock+=(originalQty.get(productId)||0)-(newQty.get(productId)||0);
+          if(p){p.stock=Math.max(0,(Number(p.stock)||0)+(originalQty.get(productId)||0)-(newQty.get(productId)||0));stockChanges.push({id:p.id,stock:p.stock})}
         }
         if(previous)Object.assign(previous,sale);
         else{state.saleSequence=Number(state.saleSequence||1)+1;state.sales.unshift(sale)}
-        save();saleDraft=[];modal=null;render();toast(previous?'Nota actualizada · inventario y saldo recalculados':'Nota de venta guardada · inventario actualizado');return
+        save();
+        if(isCloudActive())cloudSaveSale(sale,stockChanges,Boolean(previous),state.saleSequence).catch(err=>toast(err?.message||'No se pudo sincronizar la venta',true));
+        saleDraft=[];modal=null;render();toast(previous?'Nota actualizada · inventario y saldo recalculados':'Nota de venta guardada · inventario actualizado');return
       }
-      if(modal.type==='expense'){const record={id:modal.id||uid(),date:v.date,name:v.name.trim(),category:v.category,amount:Number(v.amount),payment:v.payment,notes:v.notes.trim()};if(modal.id){const idx=state.expenses.findIndex(x=>x.id===modal.id);if(idx>=0)state.expenses[idx]=record;else state.expenses.unshift(record)}else state.expenses.unshift(record);save();modal=null;render();toast(modal.id?'Gasto actualizado':'Gasto guardado');return}
+      if(modal.type==='expense'){if(isSellerRole())return toast('Solo el dueño puede registrar gastos',true);const isNew=!modal.id,record={id:modal.id||uid(),date:v.date,name:v.name.trim(),category:v.category,amount:Number(v.amount),payment:v.payment,notes:v.notes.trim()};if(modal.id){const idx=state.expenses.findIndex(x=>x.id===modal.id);if(idx>=0)state.expenses[idx]=record;else state.expenses.unshift(record)}else state.expenses.unshift(record);save();if(isCloudActive())cloudSaveExpense(record,isNew).catch(err=>toast(err?.message||'No se pudo sincronizar el gasto',true));modal=null;render();toast(modal.id?'Gasto actualizado':'Gasto guardado');return}
       if(modal.type==='product'){
+        if(isSellerRole())return toast('Solo el dueño puede agregar o editar productos',true);
         if(photoBusy)return toast('Espera a que termine de cargar la foto',true);
         stopCameraStream();
-        const old=modal.id?getProduct(modal.id):null,id=modal.id||uid();
+        const isNew=!modal.id,old=modal.id?getProduct(modal.id):null,id=modal.id||uid();
         let photo=old?.photo||'';
         if(productPhotoDraft===''){if(photo&&window.NotasApp?.removeProductImage)window.NotasApp.removeProductImage(id);photo=''}
         else if(productPhotoDraft){if(window.NotasApp?.saveProductImage){photo=window.NotasApp.saveProductImage(id,productPhotoDraft);if(!photo)return toast('No se pudo guardar la foto. Intenta con otra imagen.',true)}else photo=productPhotoDraft}
         const record={id,name:v.name.trim(),category:v.category.trim()||'Productos',emoji:v.emoji.trim()||'📦',price:Number(v.price),cost:Number(v.cost)||0,stock:Math.max(0,Number(v.stock)||0),min:Math.max(0,Number(v.min)||0),photo};
         if(modal.id)state.products=state.products.map(p=>p.id===modal.id?record:p);else state.products.push(record);
-        save();productPhotoDraft=null;productFormDraft=null;clearModalDraft();
+        save();
+        if(isCloudActive()){
+          const cloudRec=productPhotoDraft&&productPhotoDraft.startsWith('data:image/')?{...record,photo:productPhotoDraft}:record;
+          cloudSaveProduct(cloudRec,isNew).catch(err=>toast(err?.message||'No se pudo sincronizar el producto',true));
+        }
+        productPhotoDraft=null;productFormDraft=null;clearModalDraft();
         if(returnToSale){modal={type:'sale',id:returnToSale.id};saleStep=returnToSale.step;returnToSale=null;saleSearch='';saleCategory='Todas';if(!old&&record.stock>0)saleDraft.push({productId:id,product:record.name,qty:1,unitPrice:record.price})}
         else modal=null;
         render();toast('Producto guardado');return
       }
-      if(modal.type==='customer'||modal.type==='supplier'){const arr=modal.type==='customer'?state.customers:state.suppliers,record={id:modal.id||uid(),name:v.name.trim(),phone:v.phone.trim(),email:v.email?.trim()||'',notes:v.notes.trim()};if(modal.id){const old=arr.find(x=>x.id===modal.id);if(old&&old.name!==record.name&&modal.type==='customer')state.sales.forEach(s=>{if(s.customer===old.name)s.customer=record.name});const i=arr.findIndex(x=>x.id===modal.id);arr[i]=record}else arr.push(record);save();modal=null;render();toast('Contacto guardado');return}
-      if(modal.type==='collect'){const s=state.sales.find(x=>x.id===modal.id),amount=Number(v.amount);if(!s||!amount||amount<=0)return toast('Escribe un importe válido',true);if(amount>pending(s))return toast('El abono no puede superar el saldo pendiente',true);s.paid=Number(s.paid||0)+amount;s.payment=v.payment;save();modal=null;render();toast('Abono registrado');return}
-      if(modal.type==='adjust'){const p=getProduct(modal.id),raw=String(v.amount??'').trim(),amount=Math.floor(Number(raw)),mode=v.movement||'add';if(!p||!raw||!Number.isFinite(amount)||(mode==='set'?amount<0:amount<1))return toast('Ingresa una cantidad válida',true);if(mode==='remove'&&amount>p.stock)return toast('No puedes retirar más unidades de las que hay',true);p.stock=mode==='set'?amount:p.stock+(mode==='add'?amount:-amount);save();modal=null;render();toast('Existencias actualizadas');return}}
-    function deleteRecord(type,id){const labels={sale:'esta venta',expense:'este gasto',product:'este producto',customer:'este cliente',supplier:'este proveedor'};if(!confirm(`¿Eliminar ${labels[type]||'este registro'}? Esta acción no se puede deshacer.`))return;if(type==='sale'){const s=state.sales.find(x=>x.id===id);if(s)getSaleItems(s).forEach(item=>{const p=getProduct(item.productId);if(p)p.stock+=Number(item.qty)||0});state.sales=state.sales.filter(x=>x.id!==id)}if(type==='expense')state.expenses=state.expenses.filter(x=>x.id!==id);if(type==='product'){if(window.NotasApp?.removeProductImage)window.NotasApp.removeProductImage(id);state.products=state.products.filter(x=>x.id!==id)}if(type==='customer')state.customers=state.customers.filter(x=>x.id!==id);if(type==='supplier')state.suppliers=state.suppliers.filter(x=>x.id!==id);save();render();toast('Registro eliminado')}
+      if(modal.type==='customer'||modal.type==='supplier'){if(modal.type==='supplier'&&isSellerRole())return toast('Solo el dueño puede editar proveedores',true);const isNew=!modal.id,arr=modal.type==='customer'?state.customers:state.suppliers,record={id:modal.id||uid(),name:v.name.trim(),phone:v.phone.trim(),email:v.email?.trim()||'',notes:v.notes.trim()};if(modal.id){const old=arr.find(x=>x.id===modal.id);if(old&&old.name!==record.name&&modal.type==='customer')state.sales.forEach(s=>{if(s.customer===old.name)s.customer=record.name});const i=arr.findIndex(x=>x.id===modal.id);arr[i]=record}else arr.push(record);save();if(isCloudActive())cloudSaveContact(modal.type,record,isNew).catch(err=>toast(err?.message||'No se pudo sincronizar el contacto',true));modal=null;render();toast('Contacto guardado');return}
+      if(modal.type==='collect'){const s=state.sales.find(x=>x.id===modal.id),amount=Number(v.amount);if(!s||!amount||amount<=0)return toast('Escribe un importe válido',true);if(amount>pending(s))return toast('El abono no puede superar el saldo pendiente',true);s.paid=Number(s.paid||0)+amount;s.payment=v.payment;save();if(isCloudActive())cloudCollectSale(s).catch(err=>toast(err?.message||'No se pudo sincronizar el abono',true));modal=null;render();toast('Abono registrado');return}
+      if(modal.type==='adjust'){const p=getProduct(modal.id),raw=String(v.amount??'').trim(),amount=Math.floor(Number(raw)),mode=v.movement||'add';if(!p||!raw||!Number.isFinite(amount)||(mode==='set'?amount<0:amount<1))return toast('Ingresa una cantidad válida',true);if(mode==='remove'&&amount>p.stock)return toast('No puedes retirar más unidades de las que hay',true);p.stock=mode==='set'?amount:p.stock+(mode==='add'?amount:-amount);save();if(isCloudActive())cloudAdjustStock(p,p.stock).catch(err=>toast(err?.message||'No se pudo sincronizar existencias',true));modal=null;render();toast('Existencias actualizadas');return}}
+    function deleteRecord(type,id){
+      if(isSellerRole())return toast('Solo el dueño puede eliminar registros',true);
+      const labels={sale:'esta venta',expense:'este gasto',product:'este producto',customer:'este cliente',supplier:'este proveedor'};
+      if(!confirm(`¿Eliminar ${labels[type]||'este registro'}? Esta acción no se puede deshacer.`))return;
+      const stockRestores=[];
+      if(type==='sale'){const s=state.sales.find(x=>x.id===id);if(s)getSaleItems(s).forEach(item=>{const p=getProduct(item.productId);if(p){p.stock+=Number(item.qty)||0;stockRestores.push({id:p.id,stock:p.stock})}});state.sales=state.sales.filter(x=>x.id!==id)}
+      if(type==='expense')state.expenses=state.expenses.filter(x=>x.id!==id);
+      if(type==='product'){if(window.NotasApp?.removeProductImage)window.NotasApp.removeProductImage(id);state.products=state.products.filter(x=>x.id!==id)}
+      if(type==='customer')state.customers=state.customers.filter(x=>x.id!==id);
+      if(type==='supplier')state.suppliers=state.suppliers.filter(x=>x.id!==id);
+      save();
+      if(isCloudActive())cloudDeleteRecord(type,id,stockRestores).catch(err=>toast(err?.message||'No se pudo eliminar en la nube',true));
+      render();toast('Registro eliminado')
+    }
     function exportData(){const backup={...state,products:state.products.map(p=>({...p,photo:p.photo?.startsWith('content://')&&window.NotasApp?.loadProductImage?window.NotasApp.loadProductImage(p.id):p.photo||''}))};const contents=JSON.stringify(backup,null,2);if(window.NotasApp?.saveBackup){window.NotasApp.saveBackup(contents);toast('Elige dónde guardar tu copia');return}const blob=new Blob([contents],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='notas-respaldo-'+today()+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);toast('Copia de seguridad descargada')}
     function importData(file){
       const reader=new FileReader();
@@ -432,11 +1116,13 @@
       reader.readAsText(file);
     }
     function copyCatalog(){
-      const text=[state.settings.business,'Catálogo de productos',...state.products.map(p=>`${p.name} — ${money(p.price)} (${p.stock>0?'disponible':'agotado'})`)].join('\n');
+      const link=isCloudActive()?catalogUrlFor():'';
+      const lines=[state.settings.business,'Catálogo de productos',...(link?['Ver catálogo en vivo con fotos: '+link,'']:[]),...state.products.map(p=>`${p.name} — ${money(p.price)} (${p.stock>0?'disponible':'agotado'})`)];
+      const text=lines.join('\n');
       if(window.NotasApp?.shareText){window.NotasApp.shareText(text);return}
       if(navigator.share){navigator.share({title:state.settings.business||'Catálogo',text}).catch(()=>{});return}
       if(!navigator.clipboard?.writeText){toast('Compartir no está disponible en este navegador.',true);return}
-      navigator.clipboard.writeText(text).then(()=>toast('Lista copiada para compartir')).catch(()=>toast('No se pudo copiar. Revisa los permisos del navegador.',true));
+      navigator.clipboard.writeText(text).then(()=>toast(link?'Catálogo y link copiados para compartir':'Lista copiada para compartir')).catch(()=>toast('No se pudo copiar. Revisa los permisos del navegador.',true));
     }
     function showReceipt(id){modal={type:'receipt',id};render()}
     function renderReceiptCanvas(invoice){
@@ -528,7 +1214,7 @@
       try{await swRegistration?.update?.()}catch{}
       location.reload();
     }
-    window.notasBack=()=>{if(closePhotoZoom())return true;if(modal){if(modal.type==='sale'&&saleStep==='review'){captureSaleMeta();saleStep='pick';render()}else closeModal();return true}if(page!=='inicio'){page='inicio';render();return true}return false};
+    window.notasBack=()=>{if(closePhotoZoom())return true;if(modal){if(modal.type==='sale'&&saleStep==='review'){captureSaleMeta();saleStep='pick';render()}else closeModal();return true}if(cloud.publicStoreId&&!cloud.publicViaLink){clearCloudListeners();cloud.publicStoreId='';cloud.publicCart={};initCloud();render();return true}if(page!=='inicio'){page='inicio';render();return true}return false};
     function bindPageActions(){ }
     document.addEventListener('keydown',e=>{
       if(e.key==='Escape'){if(closePhotoZoom())return;escModal(e)}
@@ -537,11 +1223,12 @@
         if(s){e.preventDefault();s.focus();s.select()}
       }
     });
-    document.addEventListener('click',e=>{const el=e.target.closest('[data-action]');if(!el)return;const a=el.dataset.action;if(a==='close')closeModal();else if(a==='settings'||a==='export'||a==='copy-catalog')action(a);else if(a==='import'){document.getElementById('import-backup-file')?.click()}else if(a==='check-update'){checkForUpdates(true)}else if(a==='apply-update'){applyUpdate()}else if(a==='print'){if(window.NotasApp?.printPage)window.NotasApp.printPage();else window.print()}else if(a==='save-settings'){state.settings.business=document.getElementById('business-name').value.trim()||'Mi negocio';state.settings.address=document.getElementById('business-address').value.trim();state.settings.phone=document.getElementById('business-phone').value.trim();state.settings.email=document.getElementById('business-email').value.trim();state.settings.registration=document.getElementById('business-registration').value.trim();state.settings.seller=document.getElementById('business-seller').value.trim();state.settings.currency=document.getElementById('currency').value;save();modal=null;render();toast('Configuración guardada')}else if(a==='reset'){if(confirm('¿Restablecer Notas y reemplazar tus registros por datos de demostración?')){if(window.NotasApp?.removeProductImage)state.products.forEach(p=>window.NotasApp.removeProductImage(p.id));state=seed();state.settings={business:'Mi negocio',currency:'MXN',address:'',phone:'',email:'',registration:'',seller:'',...(state.settings||{})};state.sales.forEach((sale,index)=>sale.folio=String(state.sales.length-index).padStart(4,'0'));state.saleSequence=Math.max(1,...state.sales.map(sale=>(Number(sale.folio)||0)+1));save();modal=null;render();toast('Datos de demostración restaurados')}}else if(a.startsWith('share-receipt:'))shareReceipt(a.split(':')[1]);else if(a.startsWith('collect:')||a.startsWith('receipt:')||a.startsWith('adjust:'))action(a)});
+    document.addEventListener('click',e=>{const el=e.target.closest('[data-action]');if(!el)return;const a=el.dataset.action;if(a==='close')closeModal();else if(a==='settings'||a==='export'||a==='copy-catalog'||a==='auth'||a==='account'||a==='onboarding')action(a);else if(a==='import'){document.getElementById('import-backup-file')?.click()}else if(a==='check-update'){checkForUpdates(true)}else if(a==='apply-update'){applyUpdate()}else if(a==='print'){if(window.NotasApp?.printPage)window.NotasApp.printPage();else window.print()}else if(a==='save-settings'){if(isSellerRole())return toast('Solo el dueño puede editar la configuración',true);state.settings.business=document.getElementById('business-name').value.trim()||'Mi negocio';state.settings.address=document.getElementById('business-address').value.trim();state.settings.phone=document.getElementById('business-phone').value.trim();state.settings.email=document.getElementById('business-email').value.trim();state.settings.registration=document.getElementById('business-registration').value.trim();state.settings.seller=document.getElementById('business-seller').value.trim();state.settings.currency=document.getElementById('currency').value;save();if(isCloudActive())cloudSaveSettings().catch(err=>toast(err?.message||'No se pudo guardar en la nube',true));modal=null;render();toast('Configuración guardada')}else if(a==='reset'){if(isCloudActive())return toast('En modo nube gestiona los datos desde tus secciones',true);if(confirm('¿Restablecer Notas y reemplazar tus registros por datos de demostración?')){if(window.NotasApp?.removeProductImage)state.products.forEach(p=>window.NotasApp.removeProductImage(p.id));state=seed();state.settings={business:'Mi negocio',currency:'MXN',address:'',phone:'',email:'',registration:'',seller:'',...(state.settings||{})};state.sales.forEach((sale,index)=>sale.folio=String(state.sales.length-index).padStart(4,'0'));state.saleSequence=Math.max(1,...state.sales.map(sale=>(Number(sale.folio)||0)+1));save();modal=null;render();toast('Datos de demostración restaurados')}}else if(a.startsWith('share-receipt:'))shareReceipt(a.split(':')[1]);else if(a.startsWith('collect:')||a.startsWith('receipt:')||a.startsWith('adjust:'))action(a)});
     window.addEventListener('resize',()=>{if(page==='reportes')drawCharts()});
     if('serviceWorker'in navigator && location.protocol!=='file:')window.addEventListener('load',()=>{navigator.serviceWorker.register('./sw.js').then(reg=>{swRegistration=reg;reg.addEventListener('updatefound',()=>{const nw=reg.installing;nw?.addEventListener('statechange',()=>{if(nw.state==='installed'&&navigator.serviceWorker.controller){updateInfo=updateInfo||{webVersion:APP_LOCAL_VERSION.webVersion,notes:'Nueva versión web lista.'};render()}})})}).catch(()=>{});checkForUpdates(false)});
     else window.addEventListener('load',()=>checkForUpdates(false));
     restoreModalDraft();
+    initCloud();
     render();
     receiveCameraResult();
   })();
