@@ -1,0 +1,12 @@
+{
+  "appName": "Notas",
+  "versionName": "1.6.0",
+  "versionCode": 7,
+  "webVersion": "1.6.0",
+  "minAndroidVersionCode": 7,
+  "releaseDate": "2026-11-13",
+  "notes": "Base reconstruida con soporte completo en navegador, importación de respaldos y auto-actualizaciones.",
+  "webBaseUrl": "https://navi1896.github.io/notas-app/",
+  "updateUrl": "https://navi1896.github.io/notas-app/version.json",
+  "apkUrl": "https://github.com/navi1896/notas-app/releases/latest/download/Notas.apk"
+}
