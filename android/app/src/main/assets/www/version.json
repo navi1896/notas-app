@@ -1,11 +1,11 @@
 {
   "appName": "Notas",
-  "versionName": "1.8.5",
+  "versionName": "1.8.6",
   "versionCode": 9,
-  "webVersion": "1.8.5",
+  "webVersion": "1.8.6",
   "minAndroidVersionCode": 7,
   "releaseDate": "2026-11-14",
-  "notes": "Fuerza recarga limpia de estilos sin caché y muestra todas las fotos completas sin recortes (v1.8.5).",
+  "notes": "Modo oscuro, stock en negativo, encuadre completo de fotos, tarjetas de Inicio clicables y ventas separadas entre Dueño y Vendedor (v1.8.6).",
   "webBaseUrl": "https://navi1896.github.io/notas-app/",
   "updateUrl": "https://navi1896.github.io/notas-app/version.json",
   "apkUrl": "https://github.com/navi1896/notas-app/releases/latest/download/Notas.apk"

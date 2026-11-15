@@ -1,9 +1,9 @@
-const CACHE = 'notas-shell-v22';
+const CACHE = 'notas-shell-v23';
 const FILES = [
   './',
   './index.html',
-  './styles.css?v=1.8.5',
-  './app.js?v=1.8.5',
+  './styles.css?v=1.8.6',
+  './app.js?v=1.8.6',
   './manifest.webmanifest',
   './version.json',
   './icon.svg',

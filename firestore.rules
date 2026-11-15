@@ -40,6 +40,7 @@ rules_version = '2';
 //   - seller: string (optional, max 120)
 //   - ownerUid: string (required, immutable, == request.auth.uid on create)
 //   - saleSequence: int (required, >= 1)
+//   - allowNegativeStock: bool (optional)
 //   - createdAt: number | timestamp (optional, immutable)
 //   - updatedAt: number | timestamp (optional)
 //
@@ -62,7 +63,7 @@ rules_version = '2';
 //   - name: string (required, 1..160 chars)
 //   - category: string (optional, max 80)
 //   - price: number (required, >= 0)
-//   - stock: number (required, >= 0)
+//   - stock: number (required, -999999..999999)
 //   - min: number (optional, >= 0)
 //   - emoji: string (optional, max 16)
 //   - photo: string (optional, max 500000)
@@ -169,27 +170,35 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function memberPath(storeId) {
-      return /databases/$(database)/documents/stores/$(storeId)/members/$(request.auth.uid);
+    function hasActiveMemberRole(m) {
+      return m != null
+        && 'active' in m.data
+        && 'role' in m.data
+        && m.data.active == true
+        && m.data.role in ['owner', 'seller'];
     }
 
-    function memberDoc(storeId) {
-      return get(memberPath(storeId));
+    function hasSpecificMemberRole(m, role) {
+      return m != null
+        && 'active' in m.data
+        && 'role' in m.data
+        && m.data.active == true
+        && m.data.role == role;
     }
 
     function isActiveMember(storeId) {
       return isSignedIn()
-        && exists(memberPath(storeId))
-        && memberDoc(storeId).data.active == true
-        && memberDoc(storeId).data.role in ['owner', 'seller'];
+        && hasActiveMemberRole(get(/databases/$(database)/documents/stores/$(storeId)/members/$(request.auth.uid)));
     }
 
     function isOwner(storeId) {
-      return isActiveMember(storeId) && memberDoc(storeId).data.role == 'owner';
+      return isSignedIn()
+        && hasSpecificMemberRole(get(/databases/$(database)/documents/stores/$(storeId)/members/$(request.auth.uid)), 'owner');
     }
 
     function isSeller(storeId) {
-      return isActiveMember(storeId) && memberDoc(storeId).data.role == 'seller';
+      return isSignedIn()
+        && hasSpecificMemberRole(get(/databases/$(database)/documents/stores/$(storeId)/members/$(request.auth.uid)), 'seller');
     }
 
     // ===============================================================
@@ -281,7 +290,7 @@ service cloud.firestore {
       return data.keys().hasOnly([
           'id', 'business', 'currency', 'address', 'phone', 'email',
           'registration', 'seller', 'ownerUid', 'saleSequence',
-          'createdAt', 'updatedAt'
+          'allowNegativeStock', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasAll([
           'id', 'business', 'currency', 'ownerUid', 'saleSequence'
@@ -298,6 +307,7 @@ service cloud.firestore {
         && isRequiredString(data, 'ownerUid', 1, 128)
         && data.saleSequence is int
         && data.saleSequence >= 1
+        && (!('allowNegativeStock' in data) || data.allowNegativeStock is bool)
         && isOptionalTimestampOrNumber(data, 'createdAt')
         && isOptionalTimestampOrNumber(data, 'updatedAt');
     }
@@ -355,7 +365,7 @@ service cloud.firestore {
         && isRequiredString(data, 'name', 1, 160)
         && isOptionalString(data, 'category', 80)
         && data.price is number && data.price >= 0
-        && data.stock is number && data.stock >= 0
+        && data.stock is number && data.stock >= -999999 && data.stock <= 999999
         && isOptionalNonNegativeNumber(data, 'min')
         && isOptionalString(data, 'emoji', 16)
         && isOptionalString(data, 'photo', 500000)
@@ -531,7 +541,10 @@ service cloud.firestore {
 
     match /stores/{storeId} {
       allow read: if isSignedIn()
-        && (resource.data.ownerUid == request.auth.uid || isActiveMember(storeId));
+        && (
+          isActiveMember(storeId)
+          || (resource != null && 'ownerUid' in resource.data && resource.data.ownerUid == request.auth.uid)
+        );
 
       allow create: if isSignedIn()
         && request.resource.data.ownerUid == request.auth.uid
@@ -556,8 +569,8 @@ service cloud.firestore {
 
       // 4. Store Members
       match /members/{uid} {
-        allow read: if isActiveMember(storeId)
-          || (isSignedIn() && request.auth.uid == uid);
+        allow read: if (isSignedIn() && request.auth.uid == uid)
+          || isActiveMember(storeId);
 
         allow create: if isValidMember(request.resource.data, uid)
           && (
@@ -609,7 +622,8 @@ service cloud.firestore {
               isSeller(storeId)
               && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stock', 'updatedAt'])
               && request.resource.data.stock is number
-              && request.resource.data.stock >= 0
+              && request.resource.data.stock >= -999999
+              && request.resource.data.stock <= 999999
             )
           );
 
@@ -665,7 +679,7 @@ service cloud.firestore {
         allow delete: if isOwner(storeId);
       }
 
-      // 9. Sales (Owner full access; Seller create + payment/abono updates only)
+      // 9. Sales (Owner full access; Seller create, full edit/delete on own sales, abono updates on any sale)
       match /sales/{saleId} {
         allow read: if isActiveMember(storeId);
 
@@ -687,13 +701,27 @@ service cloud.firestore {
             isOwner(storeId)
             || (
               isSeller(storeId)
-              && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-                'paid', 'payment', 'payments', 'updatedAt'
-              ])
+              && (
+                (
+                  'sellerUid' in resource.data
+                  && resource.data.sellerUid is string
+                  && resource.data.sellerUid == request.auth.uid
+                  && request.resource.data.sellerUid == resource.data.sellerUid
+                )
+                || request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                  'paid', 'payment', 'payments', 'updatedAt'
+                ])
+              )
             )
           );
 
-        allow delete: if isOwner(storeId);
+        allow delete: if isOwner(storeId)
+          || (
+            isSeller(storeId)
+            && 'sellerUid' in resource.data
+            && resource.data.sellerUid is string
+            && resource.data.sellerUid == request.auth.uid
+          );
       }
     }
 
