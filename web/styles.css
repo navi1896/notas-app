@@ -306,3 +306,91 @@
     :root[data-theme="dark"] .sale-stock-pill.out{background:#381b19;color:#f3978f}
     :root[data-theme="dark"] .role-pill.mine{background:#243318;color:#d9f36a}
     :root[data-theme="dark"] .report-inv-box strong[style]{color:#b6ea5c!important}
+    /* Block A: Quick Calc, Change Calculator, Discounts, Split Pay & Cash Closure */
+    .calc-modal{width:min(380px,100%);padding:18px}
+    .calc-display{background:#f5f7f3;border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:12px;text-align:right;min-height:76px;display:flex;flex-direction:column;justify-content:space-between;gap:4px}
+    .calc-expr{font-size:13px;color:var(--muted);min-height:18px;word-break:break-all;font-variant-numeric:tabular-nums}
+    .calc-val{font-size:30px;font-weight:820;letter-spacing:-.02em;color:var(--text);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .calc-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+    .calc-key{min-height:50px;border-radius:11px;border:1px solid var(--line);background:#fff;color:var(--text);font:700 18px/1 var(--font);cursor:pointer;display:grid;place-items:center;transition:transform .08s ease,background .12s ease}
+    .calc-key:active{transform:scale(.96)}
+    .calc-key.op{background:#f0f4eb;color:#354a1f;border-color:#d8e3cd}
+    .calc-key.clr{background:#fdecea;color:var(--red);border-color:#f6cfc9}
+    .calc-key.eq{background:var(--lime);color:#1b2410;border-color:#b8d54c;font-weight:820}
+    .calc-footer{display:flex;gap:8px;margin-top:12px;justify-content:flex-end;flex-wrap:wrap}
+    .sale-extras-row{grid-column:1/-1;display:flex;flex-direction:column;gap:8px}
+    .sale-extras-toggle{align-self:flex-start;border:1px dashed #cfd7ca;background:#fafbf9;color:var(--muted);border-radius:9px;padding:7px 11px;font:680 12.5px/1.2 var(--font);cursor:pointer}
+    .sale-extras-toggle:hover,.sale-extras-toggle.active{border-color:#455f27;color:#354a1f;background:#f4f8ee}
+    .sale-discount-box{border:1px solid var(--line);border-radius:11px;padding:12px;background:#fafbf9;display:grid;gap:10px}
+    .sale-discount-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+    .disc-type-toggle{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff}
+    .disc-type-btn{border:0;background:transparent;padding:6px 12px;font:740 13px/1 var(--font);color:var(--muted);cursor:pointer}
+    .disc-type-btn.active{background:#202720;color:#fff}
+    .sale-discount-inputs{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end}
+    .sale-discount-summary{display:flex;justify-content:space-between;align-items:center;font-size:12.5px;color:var(--muted);padding-top:6px;border-top:1px dashed var(--line)}
+    .sale-discount-summary strong{color:var(--text);font-variant-numeric:tabular-nums}
+    .cash-change-box,.split-pay-box{grid-column:1/-1;border:1px solid var(--line);border-radius:11px;padding:12px;background:#fafbf9;display:grid;gap:10px}
+    .cash-box-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+    .cash-box-head label{font-size:12.5px;font-weight:720;color:var(--text)}
+    .cash-bill-chips{display:flex;flex-wrap:wrap;gap:6px}
+    .bill-chip{border:1px solid #d5ded0;background:#fff;color:var(--text);border-radius:8px;padding:6px 10px;font:700 12.5px/1 var(--font);cursor:pointer;font-variant-numeric:tabular-nums}
+    .bill-chip.exact{background:#eff6e4;border-color:#bdd59b;color:#36501d}
+    .bill-chip.active{background:#202720;color:#fff;border-color:#202720}
+    .input-with-calc{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:stretch}
+    .calc-inline-btn{border:1px solid var(--line);background:#fff;color:var(--text);border-radius:9px;padding:0 11px;font:700 12.5px/1 var(--font);cursor:pointer;display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+    .change-result{display:flex;align-items:center;justify-content:space-between;padding:9px 12px;border-radius:9px;font-size:13px;font-weight:680;font-variant-numeric:tabular-nums}
+    .change-result.ok{background:#e9f6ec;color:#176734}
+    .change-result.exact{background:#eef5e4;color:#354a1f}
+    .change-result.short{background:#fff0df;color:#a85712}
+    .change-result.neutral{background:#f1f3ef;color:var(--muted)}
+    .split-pay-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+    .split-other-row{display:grid;grid-template-columns:minmax(0,1fr);gap:6px}
+    .invoice-discount-row{display:flex;justify-content:space-between;font-size:13px;color:var(--muted);padding:4px 0}
+    .invoice-payments-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+    .invoice-pay-chip{font-size:11.5px;font-weight:700;padding:4px 8px;border-radius:999px;background:#f2f5ee;color:#354a1f;border:1px solid var(--line)}
+    .invoice-note-box{margin-top:10px;padding:8px 10px;border-radius:8px;background:#f8faf6;border:1px solid var(--line);font-size:12.5px;color:var(--text);word-break:break-word}
+    .cash-close-modal{width:min(560px,100%)}
+    .cc-period-pills{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+    .cc-summary-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:12px}
+    .cc-stat{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fafbf9}
+    .cc-stat span{display:block;font-size:11.5px;color:var(--muted)}
+    .cc-stat strong{display:block;margin-top:4px;font-size:16px;font-weight:780;font-variant-numeric:tabular-nums}
+    .cc-stat.highlight{background:#eff6e4;border-color:#c6dca6;grid-column:1/-1;display:flex;justify-content:space-between;align-items:center}
+    .cc-stat.highlight strong{margin-top:0;font-size:19px;color:#2e4818}
+    .cc-diff-banner{padding:10px 12px;border-radius:10px;font-size:13.5px;font-weight:720;display:flex;justify-content:space-between;align-items:center;font-variant-numeric:tabular-nums}
+    .cc-diff-banner.ok{background:#e9f6ec;color:#176734}
+    .cc-diff-banner.pos{background:#eef5e4;color:#354a1f}
+    .cc-diff-banner.neg{background:#fdecea;color:var(--red)}
+    .cc-history-list{display:grid;gap:8px;max-height:220px;overflow-y:auto;margin-top:10px}
+    .cc-history-item{border:1px solid var(--line);border-radius:10px;padding:10px 12px;display:flex;justify-content:space-between;align-items:center;gap:10px;background:#fff}
+    .cc-history-main strong{display:block;font-size:13px}
+    .cc-history-main small{display:block;font-size:11.5px;color:var(--muted);margin-top:2px}
+    .cc-history-right{text-align:right;font-variant-numeric:tabular-nums}
+    @media(max-width:600px){
+      .split-pay-grid,.cc-summary-grid{grid-template-columns:1fr}
+      .calc-key{min-height:46px}
+    }
+    :root[data-theme="dark"] .calc-display{background:#121814;border-color:#2b382f}
+    :root[data-theme="dark"] .calc-key{background:#1b231e;border-color:#2b382f;color:#edf2ed}
+    :root[data-theme="dark"] .calc-key.op{background:#233126;color:#c9e87e;border-color:#344838}
+    :root[data-theme="dark"] .calc-key.clr{background:#381b19;color:#f3978f;border-color:#5b2b27}
+    :root[data-theme="dark"] .calc-key.eq{background:#d9f36a;color:#141e0d;border-color:#c6e452}
+    :root[data-theme="dark"] .sale-extras-toggle{background:#161d18;border-color:#2d3b32;color:#a8b5ac}
+    :root[data-theme="dark"] .sale-extras-toggle:hover,:root[data-theme="dark"] .sale-extras-toggle.active{background:#22301a;border-color:#688e33;color:#d9f36a}
+    :root[data-theme="dark"] .sale-discount-box,:root[data-theme="dark"] .cash-change-box,:root[data-theme="dark"] .split-pay-box,:root[data-theme="dark"] .cc-stat{background:#161d18;border-color:#2b382f}
+    :root[data-theme="dark"] .disc-type-toggle{background:#121814;border-color:#2b382f}
+    :root[data-theme="dark"] .disc-type-btn{color:#a8b5ac}
+    :root[data-theme="dark"] .disc-type-btn.active{background:#d9f36a;color:#141e0d}
+    :root[data-theme="dark"] .bill-chip,:root[data-theme="dark"] .calc-inline-btn{background:#1f2821;border-color:#2f3d34;color:#edf2ed}
+    :root[data-theme="dark"] .bill-chip.exact{background:#213217;border-color:#44682b;color:#c9e87e}
+    :root[data-theme="dark"] .bill-chip.active{background:#d9f36a;color:#141e0d;border-color:#d9f36a}
+    :root[data-theme="dark"] .change-result.ok,:root[data-theme="dark"] .cc-diff-banner.ok{background:#163322;color:#7ee2a8}
+    :root[data-theme="dark"] .change-result.exact,:root[data-theme="dark"] .cc-diff-banner.pos{background:#223118;color:#c9e87e}
+    :root[data-theme="dark"] .change-result.short{background:#382612;color:#f6b46d}
+    :root[data-theme="dark"] .change-result.neutral{background:#1d2520;color:#9ba89f}
+    :root[data-theme="dark"] .cc-diff-banner.neg{background:#381b19;color:#f3978f}
+    :root[data-theme="dark"] .cc-stat.highlight{background:#203017;border-color:#406028}
+    :root[data-theme="dark"] .cc-stat.highlight strong{color:#d9f36a}
+    :root[data-theme="dark"] .cc-history-item{background:#19211b;border-color:#2b382f}
+    :root[data-theme="dark"] .invoice-pay-chip{background:#22301a;border-color:#3b5229;color:#c9e87e}
+    :root[data-theme="dark"] .invoice-note-box{background:#151c17;border-color:#2b382f;color:#dce4de}

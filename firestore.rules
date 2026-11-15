@@ -41,6 +41,7 @@ rules_version = '2';
 //   - ownerUid: string (required, immutable, == request.auth.uid on create)
 //   - saleSequence: int (required, >= 1)
 //   - allowNegativeStock: bool (optional)
+//   - cashFloat: number (optional, >= 0)
 //   - createdAt: number | timestamp (optional, immutable)
 //   - updatedAt: number | timestamp (optional)
 //
@@ -65,6 +66,7 @@ rules_version = '2';
 //   - price: number (required, >= 0)
 //   - stock: number (required, -999999..999999)
 //   - min: number (optional, >= 0)
+//   - barcode: string (optional, max 80)
 //   - emoji: string (optional, max 16)
 //   - photo: string (optional, max 500000)
 //   - createdAt: number | timestamp (optional, immutable)
@@ -128,11 +130,37 @@ rules_version = '2';
 //   - productId: string (optional, max 128)
 //   - qty: number (optional, >= 0)
 //   - unitPrice: number (optional, >= 0)
+//   - subtotal: number (optional, >= 0)
+//   - discount: number (optional, >= 0)
 //   - total: number (required, >= 0)
 //   - customer: string (optional, max 160)
 //   - payment: string (required, 1..60 chars)
 //   - paid: number (required, >= 0 and <= total)
+//   - cashReceived: number (optional, >= 0)
+//   - changeDue: number (optional, >= 0)
+//   - notes: string (optional, max 500)
 //   - payments: list (optional, max 100 items)
+//   - createdAt: number | timestamp (optional, immutable)
+//   - updatedAt: number | timestamp (optional)
+//
+// Subcollection: stores/{storeId}/cashClosures
+// Document ID: {closureId}
+// Fields:
+//   - id: string (required, immutable, == closureId, 1..128 chars)
+//   - date: string (required, 1..32 chars)
+//   - openedAt: number | timestamp (optional)
+//   - closedAt: number | timestamp (required)
+//   - openingFloat: number (required, >= 0)
+//   - cashSales: number (optional, >= 0)
+//   - cardSales: number (optional, >= 0)
+//   - transferSales: number (optional, >= 0)
+//   - expensesTotal: number (optional, >= 0)
+//   - expectedCash: number (required)
+//   - countedCash: number (required, >= 0)
+//   - difference: number (required)
+//   - notes: string (optional, max 500)
+//   - closedBy: string (optional, max 120)
+//   - closedByUid: string (optional, max 128)
 //   - createdAt: number | timestamp (optional, immutable)
 //   - updatedAt: number | timestamp (optional)
 //
@@ -290,7 +318,7 @@ service cloud.firestore {
       return data.keys().hasOnly([
           'id', 'business', 'currency', 'address', 'phone', 'email',
           'registration', 'seller', 'ownerUid', 'saleSequence',
-          'allowNegativeStock', 'createdAt', 'updatedAt'
+          'allowNegativeStock', 'cashFloat', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasAll([
           'id', 'business', 'currency', 'ownerUid', 'saleSequence'
@@ -308,6 +336,7 @@ service cloud.firestore {
         && data.saleSequence is int
         && data.saleSequence >= 1
         && (!('allowNegativeStock' in data) || data.allowNegativeStock is bool)
+        && isOptionalNonNegativeNumber(data, 'cashFloat')
         && isOptionalTimestampOrNumber(data, 'createdAt')
         && isOptionalTimestampOrNumber(data, 'updatedAt');
     }
@@ -356,7 +385,7 @@ service cloud.firestore {
     function isValidProduct(data, productId) {
       return data.keys().hasOnly([
           'id', 'name', 'category', 'price', 'stock',
-          'min', 'emoji', 'photo', 'createdAt', 'updatedAt'
+          'min', 'barcode', 'emoji', 'photo', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasAll(['id', 'name', 'price', 'stock'])
         && !('cost' in data)
@@ -367,6 +396,7 @@ service cloud.firestore {
         && data.price is number && data.price >= 0
         && data.stock is number && data.stock >= -999999 && data.stock <= 999999
         && isOptionalNonNegativeNumber(data, 'min')
+        && isOptionalString(data, 'barcode', 80)
         && isOptionalString(data, 'emoji', 16)
         && isOptionalString(data, 'photo', 500000)
         && isOptionalTimestampOrNumber(data, 'createdAt')
@@ -422,7 +452,8 @@ service cloud.firestore {
       return data.keys().hasOnly([
           'id', 'folio', 'date', 'time', 'seller', 'sellerUid',
           'items', 'product', 'productId', 'qty', 'unitPrice',
-          'total', 'customer', 'payment', 'paid', 'payments',
+          'subtotal', 'discount', 'total', 'customer', 'payment',
+          'paid', 'cashReceived', 'changeDue', 'notes', 'payments',
           'createdAt', 'updatedAt'
         ])
         && data.keys().hasAll(['id', 'date', 'total', 'payment', 'paid'])
@@ -438,11 +469,47 @@ service cloud.firestore {
         && isOptionalString(data, 'productId', 128)
         && isOptionalNonNegativeNumber(data, 'qty')
         && isOptionalNonNegativeNumber(data, 'unitPrice')
+        && isOptionalNonNegativeNumber(data, 'subtotal')
+        && isOptionalNonNegativeNumber(data, 'discount')
         && data.total is number && data.total >= 0
         && isOptionalString(data, 'customer', 160)
         && isRequiredString(data, 'payment', 1, 60)
         && data.paid is number && data.paid >= 0 && data.paid <= data.total
+        && isOptionalNonNegativeNumber(data, 'cashReceived')
+        && isOptionalNonNegativeNumber(data, 'changeDue')
+        && isOptionalString(data, 'notes', 500)
         && (!('payments' in data) || (data.payments is list && data.payments.size() <= 100))
+        && isOptionalTimestampOrNumber(data, 'createdAt')
+        && isOptionalTimestampOrNumber(data, 'updatedAt');
+    }
+
+    function isValidCashClosure(data, closureId) {
+      return data.keys().hasOnly([
+          'id', 'date', 'openedAt', 'closedAt', 'openingFloat',
+          'cashSales', 'cardSales', 'transferSales', 'expensesTotal',
+          'expectedCash', 'countedCash', 'difference', 'notes',
+          'closedBy', 'closedByUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasAll([
+          'id', 'date', 'closedAt', 'openingFloat',
+          'expectedCash', 'countedCash', 'difference'
+        ])
+        && isRequiredString(data, 'id', 1, 128)
+        && data.id == closureId
+        && isRequiredString(data, 'date', 1, 32)
+        && isOptionalTimestampOrNumber(data, 'openedAt')
+        && isValidTimestampOrNumber(data.closedAt)
+        && data.openingFloat is number && data.openingFloat >= 0
+        && isOptionalNonNegativeNumber(data, 'cashSales')
+        && isOptionalNonNegativeNumber(data, 'cardSales')
+        && isOptionalNonNegativeNumber(data, 'transferSales')
+        && isOptionalNonNegativeNumber(data, 'expensesTotal')
+        && data.expectedCash is number
+        && data.countedCash is number && data.countedCash >= 0
+        && data.difference is number
+        && isOptionalString(data, 'notes', 500)
+        && isOptionalString(data, 'closedBy', 120)
+        && isOptionalString(data, 'closedByUid', 128)
         && isOptionalTimestampOrNumber(data, 'createdAt')
         && isOptionalTimestampOrNumber(data, 'updatedAt');
     }
@@ -722,6 +789,28 @@ service cloud.firestore {
             && resource.data.sellerUid is string
             && resource.data.sellerUid == request.auth.uid
           );
+      }
+
+      // 9b. Cash Closures (Corte de caja: Owner full access; Seller read & create own)
+      match /cashClosures/{closureId} {
+        allow read: if isActiveMember(storeId);
+
+        allow create: if isActiveMember(storeId)
+          && isValidCashClosure(request.resource.data, closureId)
+          && (
+            isOwner(storeId)
+            || (
+              isSeller(storeId)
+              && request.resource.data.closedByUid == request.auth.uid
+            )
+          );
+
+        allow update: if isOwner(storeId)
+          && isValidCashClosure(request.resource.data, closureId)
+          && request.resource.data.id == resource.data.id
+          && isImmutableIfPresent('createdAt');
+
+        allow delete: if isOwner(storeId);
       }
     }
 
