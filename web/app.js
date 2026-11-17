@@ -38,7 +38,7 @@
       messagingSenderId:'1002701021775',
       measurementId:'G-787ZQ138B2'
     };
-    const APP_LOCAL_VERSION=(()=>{try{const info=window.NotasApp?.getAppVersion?.();if(info)return JSON.parse(info)}catch{}return {versionCode:9,versionName:'1.9.0',webVersion:'1.9.0',platform:'web'}})();
+    const APP_LOCAL_VERSION=(()=>{try{const info=window.NotasApp?.getAppVersion?.();if(info)return JSON.parse(info)}catch{}return {versionCode:9,versionName:'1.9.1',webVersion:'1.9.1',platform:'web'}})();
     const initialCatalogParam=(()=>{try{const u=new URL(location.href);const q=u.searchParams.get('catalogo')||u.searchParams.get('catalog')||'';if(q)return q.trim();const h=location.hash||'';const m=h.match(/catalogo=([a-zA-Z0-9_-]+)/);return m?m[1]:''}catch{return ''}})();
     let cloud={
       sdkLoaded:false,sdkError:'',app:null,auth:null,db:null,fb:null,
@@ -738,7 +738,7 @@
         ...(isSellerRole()?[]:state.expenses.map(e=>({kind:'expense',date:e.date,title:e.name,sub:e.category||'Gasto',amount:e.amount})))
       ].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,5);
       if(!rows.length)return `<div class="empty">Todavía no hay actividad. Registra tu primera venta.</div>`;
-      return `<div class="activity">${rows.map(r=>`<div class="activity-item"><div class="activity-mark ${r.kind==='sale'?'':'out'}">${r.kind==='sale'?'+':'−'}</div><div class="activity-main"><div class="activity-name">${esc(r.title)}</div><div class="activity-meta">${fmtDate(r.date)} · ${esc(r.sub)}</div></div><div class="activity-amount" style="color:${r.kind==='sale'?'#455f27':'#a05b26'}">${r.kind==='sale'?'+':'−'}${money(r.amount)}</div></div>`).join('')}</div>`;
+      return `<div class="activity">${rows.map(r=>`<div class="activity-item"><div class="activity-mark ${r.kind==='sale'?'':'out'}">${r.kind==='sale'?'+':'−'}</div><div class="activity-main"><div class="activity-name">${esc(r.title)}</div><div class="activity-meta">${fmtDate(r.date)} · ${esc(r.sub)}</div></div><div class="activity-amount ${r.kind==='sale'?'in':'out'}">${r.kind==='sale'?'+':'−'}${money(r.amount)}</div></div>`).join('')}</div>`;
     }
     function toolbar(placeholder='Buscar…',filters=''){return `<div class="toolbar"><div class="searchbox"><span>${icon('search',16)}</span><input id="list-search" value="${esc(search)}" placeholder="${placeholder}" /></div>${filters}</div>`}
     function tableShell(title,sub,rows,cols,emptyText,tableClass='',headRight=''){return `<section class="card table-card" style="margin-top:0"><div class="table-head"><div><h2 class="panel-title">${title}</h2><p class="panel-note">${sub}</p></div>${headRight}</div>${rows.length?`<div class="table-wrap ${tableClass}"><table><thead><tr>${cols}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`:`<div class="empty"><div class="empty-icon">🗒️</div>${emptyText}</div>`}</section>`}

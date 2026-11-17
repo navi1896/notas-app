@@ -1,11 +1,11 @@
 {
   "appName": "Notas",
-  "versionName": "1.9.0",
+  "versionName": "1.9.1",
   "versionCode": 9,
-  "webVersion": "1.9.0",
+  "webVersion": "1.9.1",
   "minAndroidVersionCode": 7,
-  "releaseDate": "2026-11-14",
-  "notes": "Cobro rápido y caja diaria: calculadora rápida, cambio en efectivo, descuentos y notas en ticket, pagos combinados y corte de caja por turno (v1.9.0).",
+  "releaseDate": "2026-11-16",
+  "notes": "Corrección de contraste en modo oscuro al ver comprobantes/notas generadas, Inicio, Inventario móvil, catálogo público y variables de calculadora/descuentos (v1.9.1).",
   "webBaseUrl": "https://navi1896.github.io/notas-app/",
   "updateUrl": "https://navi1896.github.io/notas-app/version.json",
   "apkUrl": "https://github.com/navi1896/notas-app/releases/latest/download/Notas.apk"
