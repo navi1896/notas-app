@@ -1,11 +1,11 @@
 {
   "appName": "Notas",
-  "versionName": "1.9.1",
+  "versionName": "1.9.2",
   "versionCode": 9,
-  "webVersion": "1.9.1",
+  "webVersion": "1.9.2",
   "minAndroidVersionCode": 7,
-  "releaseDate": "2026-11-16",
-  "notes": "Corrección de contraste en modo oscuro al ver comprobantes/notas generadas, Inicio, Inventario móvil, catálogo público y variables de calculadora/descuentos (v1.9.1).",
+  "releaseDate": "2026-11-24",
+  "notes": "Inicio limpio sin datos de prueba precargados (productos, deudas, ventas o alertas) y sin botones de vista previa de vendedor (v1.9.2).",
   "webBaseUrl": "https://navi1896.github.io/notas-app/",
   "updateUrl": "https://navi1896.github.io/notas-app/version.json",
   "apkUrl": "https://github.com/navi1896/notas-app/releases/latest/download/Notas.apk"
